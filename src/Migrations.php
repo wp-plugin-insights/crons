@@ -36,6 +36,10 @@ class Migrations
             $this->migrate120();
         }
 
+        if (version_compare($stored, '1.3.0', '<')) {
+            $this->migrate130();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -89,6 +93,18 @@ class Migrations
     // -------------------------------------------------------------------------
     // Migration routines (one method per version, never modified)
     // -------------------------------------------------------------------------
+
+    /**
+     * 1.3.0 — Add plugin_source column to track the origin of each plugin record.
+     */
+    private function migrate130(): void
+    {
+        $this->db->query(
+            "ALTER TABLE `plugin`
+             ADD COLUMN IF NOT EXISTS `plugin_source` varchar(250)
+                 CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL"
+        );
+    }
 
     /**
      * 1.1.0 — Add plugin_zip column to store the latest version download URL.

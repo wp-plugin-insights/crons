@@ -44,14 +44,17 @@ class PluginSync
             return 'unchanged';
         }
 
+        $source = 'wordpress.org';
+
         $stmt = $this->db->prepare(
             'INSERT INTO plugin (
                 plugin_slug, plugin_version, plugin_installs, plugin_zip,
                 plugin_name, plugin_requires, plugin_tested, plugin_requires_php,
                 plugin_requires_plugins, plugin_rating, plugin_num_ratings,
                 plugin_support_threads, plugin_support_threads_resolved,
-                plugin_downloaded, plugin_last_updated, plugin_added
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                plugin_downloaded, plugin_last_updated, plugin_added,
+                plugin_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
                 plugin_version                  = VALUES(plugin_version),
                 plugin_installs                 = VALUES(plugin_installs),
@@ -71,7 +74,7 @@ class PluginSync
         );
 
         $stmt->bind_param(
-            'ssissssssiiiiiss',
+            'ssissssssiiiiisss',
             $slug,
             $version,
             $installs,
@@ -87,7 +90,8 @@ class PluginSync
             $supportThreadsResolved,
             $downloaded,
             $lastUpdated,
-            $added
+            $added,
+            $source
         );
 
         $stmt->execute();

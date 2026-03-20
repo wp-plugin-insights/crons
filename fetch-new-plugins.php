@@ -20,7 +20,7 @@ require_once __DIR__ . '/src/WpPluginFetcher.php';
 require_once __DIR__ . '/src/PluginSync.php';
 
 /** Current schema version. Increment when migrations are added. */
-const DB_VERSION = '1.2.0';
+const DB_VERSION = '1.3.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;
