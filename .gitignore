@@ -1,0 +1,14 @@
+# Claude Code
+CLAUDE.md
+AGENTS-generic.md
+.claude/
+
+# Database credentials
+dbcon.php
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
