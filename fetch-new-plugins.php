@@ -14,7 +14,7 @@
 
 declare(strict_types=1);
 
-require_once __DIR__ . '/dbcon.php';
+require_once __DIR__ . '/../dbcon.php';
 require_once __DIR__ . '/src/Migrations.php';
 require_once __DIR__ . '/src/WpPluginFetcher.php';
 require_once __DIR__ . '/src/PluginSync.php';
