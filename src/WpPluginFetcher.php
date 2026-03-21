@@ -5,14 +5,27 @@ declare(strict_types=1);
 /**
  * Fetches plugin data from the WordPress.org Plugins API.
  *
+ * The browse mode and field selection are configured at construction time so
+ * the same class can drive both the high-frequency "updated" cron and the
+ * daily "new" full-sync cron.
+ *
  * Endpoint: https://api.wordpress.org/plugins/info/1.2/
- * Browse: new (plugins ordered by date added, newest first)
  */
 class WpPluginFetcher
 {
-    private const API_URL = 'https://api.wordpress.org/plugins/info/1.2/';
-    private const TIMEOUT = 30;
+    private const API_URL   = 'https://api.wordpress.org/plugins/info/1.2/';
+    private const TIMEOUT   = 30;
     private const USER_AGENT = 'PluginInsight/1.0 (+https://plugininsight.com)';
+
+    /**
+     * @param string               $browse API browse mode ('updated', 'new', …).
+     * @param array<string, mixed> $fields Fields to request from the API (1 = on, 0 = off).
+     */
+    public function __construct(
+        private readonly string $browse,
+        private readonly array  $fields
+    ) {
+    }
 
     /**
      * Fetches one page of plugins from the WordPress.org API.
@@ -32,22 +45,8 @@ class WpPluginFetcher
         $url = self::API_URL . '?' . http_build_query([
             'action'  => 'query_plugins',
             'request' => [
-                'browse'   => 'updated',
-                'fields'   => [
-                    'versions'        => 1,
-                    'author'          => 1,
-                    'author_profile'  => 0,
-                    'description'     => 0,
-                    'rating'          => 1,
-                    'ratings'         => 0,
-                    'downloaded'      => 1,
-                    'download_link'   => 1,
-                    'last_updated'    => 1,
-                    'active_installs' => 1,
-                    'icons'           => 1,
-                    'tags'            => 0,
-                    'donate_link'     => 0,
-                ],
+                'browse'   => $this->browse,
+                'fields'   => $this->fields,
                 'per_page' => $perPage,
                 'page'     => $page,
             ],

@@ -32,8 +32,22 @@ const PER_PAGE = 200;
 $migrations = new Migrations($db);
 $migrations->run(DB_VERSION);
 
-$fetcher = new WpPluginFetcher();
-$syncer  = new PluginSync($db);
+$fetcher = new WpPluginFetcher('updated', [
+    'versions'        => 1,
+    'author'          => 1,
+    'author_profile'  => 0,
+    'description'     => 0,
+    'rating'          => 1,
+    'ratings'         => 0,
+    'downloaded'      => 1,
+    'download_link'   => 1,
+    'last_updated'    => 1,
+    'active_installs' => 1,
+    'icons'           => 1,
+    'tags'            => 0,
+    'donate_link'     => 0,
+]);
+$syncer = new PluginSync($db);
 
 // ---------------------------------------------------------------------------
 // Fetch page 1 and sync
