@@ -1,19 +1,58 @@
 # PluginInsight Crons
 
-PHP CLI scripts that fetch and synchronize WordPress.org plugin data into the PluginInsight database.
+PHP CLI scripts that fetch, synchronize, and analyze WordPress.org plugin data.
 
 ---
 
 ## Overview
 
-Two complementary crons keep the database in sync:
+Three crons work in pipeline:
 
-| Script | Frequency | API browse | Purpose |
-|---|---|---|---|
-| `fetch-new-plugins.php` | Every 5 min | `updated` | Catches version bumps and stats changes as soon as they happen |
-| `fetch-all-plugins.php` | Daily at 02:00 UTC | `new` | Full sweep of all ~62 000 plugins; inserts new ones and refreshes all data |
+| Script | Frequency | Purpose |
+|---|---|---|
+| `fetch-new-plugins.php` | Every 5 min | Fetches the 200 most recently updated plugins (`browse=updated`) and upserts them with their version history |
+| `fetch-all-plugins.php` | Daily at 02:00 UTC | Full sweep of all ~62 000 plugins (`browse=new`); inserts new ones and refreshes all data |
+| `validate-plugins.php` | Every minute | Downloads and extracts ZIP files for pending versions, validates `readme.txt`, and publishes to RabbitMQ |
 
-Both scripts share the same `PluginSync` class and write to the same tables, so there is no risk of conflicts or duplicates — every write uses `INSERT … ON DUPLICATE KEY UPDATE`.
+---
+
+## Requirements
+
+- PHP 8.3–8.5 with extensions: `mysqli`, `curl`, `zip`, `amqp`
+- MariaDB 11.4+
+- RabbitMQ with exchange `plugin.analysis.all` (fanout)
+
+Install the AMQP extension:
+```bash
+apt-get install php8.4-amqp
+```
+
+---
+
+## Configuration
+
+Two files must be created from their `.example.php` templates before running any script:
+
+### `../dbcon.php`
+Database connection — lives one level above the repo root. See the host server's `/webs/plugininsight/database.txt` for credentials.
+
+### `rabbitmq.php`
+```bash
+cp rabbitmq.example.php rabbitmq.php
+# then edit rabbitmq.php with real credentials
+```
+
+| Constant | Default | Description |
+|---|---|---|
+| `RABBITMQ_HOST` | `127.0.0.1` | Broker host |
+| `RABBITMQ_PORT` | `5672` | Broker port |
+| `RABBITMQ_USER` | — | Login |
+| `RABBITMQ_PASS` | — | Password |
+| `RABBITMQ_VHOST` | `/` | Virtual host |
+| `RABBITMQ_EXCHANGE` | `plugin.analysis.all` | Fanout exchange to publish to |
+| `RABBITMQ_QUEUE` | `plugin-validation` | Routing key (ignored by fanout) |
+
+Both files are gitignored.
 
 ---
 
@@ -52,23 +91,55 @@ Both scripts share the same `PluginSync` class and write to the same tables, so 
 | Column | Type | Notes |
 |---|---|---|
 | `plugin_id` | bigint FK | references `plugin.plugin_id` |
-| `plugin_version` | varchar(250) | release tag, e.g. `2.7.3` |
+| `plugin_version` | varchar(250) PK | release tag, e.g. `2.7.3` |
 | `plugin_version_zip` | varchar(500) | download URL for that release |
-| `plugin_version_tested` | datetime | set externally when a test run completes; NULL until then |
+| `plugin_version_path` | varchar(500) | absolute path to the extracted directory; NULL until validated |
+| `plugin_version_tested` | datetime | set when validation completes; NULL = pending |
 
-The `trunk` pseudo-version returned by the API is skipped — it is a floating pointer, not a discrete release.
+`trunk` is skipped — it is a floating pointer, not a discrete release.
 
 ### Schema versioning
 
-Migrations run automatically on every script startup. The current version (`DB_VERSION = 1.4.0`) is stored in `plugin_schema_meta` and compared against the constant; pending migrations are applied in order and the stored version is updated.
+Migrations run automatically on every script startup. The current version (`DB_VERSION = 1.5.0`) is stored in `plugin_schema_meta` and compared against the constant; pending migrations are applied in order.
+
+To reset the validation queue:
+```sql
+UPDATE plugin_version SET plugin_version_tested = NULL, plugin_version_path = NULL;
+```
 
 ---
 
-## Requirements
+## RabbitMQ topology
 
-- PHP 8.3–8.5 with the `mysqli` and `curl` extensions
-- MariaDB 11.4+
-- Database credentials in `/webs/plugininsight/database.txt` (loaded via `../dbcon.php`)
+```
+plugin.analysis.all  (fanout)
+    ├── plugin.analysis.ai       (fanout) → queue: plugin.analysis.ai
+    ├── plugin.analysis.basic    (fanout) → queue: plugin.analysis.basic
+    └── plugin.analysis.security (fanout) → queue: plugin.analysis.security
+```
+
+Each validated plugin version is published as a persistent JSON message:
+
+```json
+{
+  "name": "inline-context",
+  "source": "wordpress.org",
+  "version": "2.7.3",
+  "src": "/webs/plugininsight/extracted/inline-context/2.7.3"
+}
+```
+
+To check queue depths:
+```bash
+rabbitmqctl list_queues name messages_ready
+```
+
+To purge all queues:
+```bash
+rabbitmqadmin purge queue name=plugin.analysis.ai
+rabbitmqadmin purge queue name=plugin.analysis.basic
+rabbitmqadmin purge queue name=plugin.analysis.security
+```
 
 ---
 
@@ -77,74 +148,57 @@ Migrations run automatically on every script startup. The current version (`DB_V
 ```bash
 cd /webs/plugininsight/crons
 
-# High-frequency sync (latest updated plugins, page 1 only)
+# Sync recently updated plugins (page 1 only)
 php8.4 fetch-new-plugins.php
 
-# Full sync (all plugins, all pages — takes several minutes)
+# Full sync — all plugins, all pages (takes several minutes)
 php8.4 fetch-all-plugins.php
-```
 
-Example output — `fetch-new-plugins.php`:
-
-```
-Done. Inserted: 3 | Updated: 197 | Unchanged: 0
-```
-
-Example output — `fetch-all-plugins.php`:
-
-```
-[2026-03-21 02:00:01] Starting full sync
-[2026-03-21 02:00:02] Total plugins: 61999 — expected pages: 310
-[2026-03-21 02:00:12] Page 10/310 — inserted: 0, updated: 2000
-...
-[2026-03-21 02:07:44] Done. Inserted: 12 | Updated: 61987 | Unchanged: 0 | Errors: 0
+# Validate a batch of 10 pending plugin versions
+php8.4 validate-plugins.php
 ```
 
 ---
 
 ## Systemd setup
 
-Four unit files are provided (two per cron):
+Six unit files, two per cron:
 
 | File | Purpose |
 |---|---|
-| `plugininsight-fetch-new-plugins.service` | Runs `fetch-new-plugins.php` as a one-shot job |
-| `plugininsight-fetch-new-plugins.timer` | Fires every 5 minutes |
-| `plugininsight-fetch-all-plugins.service` | Runs `fetch-all-plugins.php` as a one-shot job |
-| `plugininsight-fetch-all-plugins.timer` | Fires daily at 02:00 UTC |
+| `plugininsight-fetch-new-plugins.service` | Runs `fetch-new-plugins.php` |
+| `plugininsight-fetch-new-plugins.timer` | Every 5 minutes |
+| `plugininsight-fetch-all-plugins.service` | Runs `fetch-all-plugins.php` |
+| `plugininsight-fetch-all-plugins.timer` | Daily at 02:00 UTC |
+| `plugininsight-validate-plugins.service` | Runs `validate-plugins.php` |
+| `plugininsight-validate-plugins.timer` | Every minute |
 
 ### Install
 
-The unit files are already installed in `/etc/systemd/system/`. To enable both timers:
+Unit files are already installed in `/etc/systemd/system/`. Enable all timers:
 
 ```bash
 systemctl daemon-reload
-
 systemctl enable --now plugininsight-fetch-new-plugins.timer
 systemctl enable --now plugininsight-fetch-all-plugins.timer
+systemctl enable --now plugininsight-validate-plugins.timer
 ```
 
 ### Verify
 
 ```bash
-# List all active PluginInsight timers with next trigger times
+# All timers and next trigger times
 systemctl list-timers 'plugininsight-*'
 
-# Status of each timer
-systemctl status plugininsight-fetch-new-plugins.timer
-systemctl status plugininsight-fetch-all-plugins.timer
-
-# Run a job immediately (without waiting for the timer)
+# Run a job immediately
 systemctl start plugininsight-fetch-new-plugins.service
 systemctl start plugininsight-fetch-all-plugins.service
+systemctl start plugininsight-validate-plugins.service
 
 # Follow live output
 journalctl -u plugininsight-fetch-new-plugins.service -f
 journalctl -u plugininsight-fetch-all-plugins.service -f
-
-# Review last run
-journalctl -u plugininsight-fetch-new-plugins.service -n 50 --no-pager
-journalctl -u plugininsight-fetch-all-plugins.service -n 50 --no-pager
+journalctl -u plugininsight-validate-plugins.service -f
 ```
 
 ### Disable
@@ -152,6 +206,7 @@ journalctl -u plugininsight-fetch-all-plugins.service -n 50 --no-pager
 ```bash
 systemctl disable --now plugininsight-fetch-new-plugins.timer
 systemctl disable --now plugininsight-fetch-all-plugins.timer
+systemctl disable --now plugininsight-validate-plugins.timer
 ```
 
 ---
