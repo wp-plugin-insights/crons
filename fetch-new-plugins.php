@@ -20,7 +20,7 @@ require_once __DIR__ . '/src/WpPluginFetcher.php';
 require_once __DIR__ . '/src/PluginSync.php';
 
 /** Current schema version. Increment when migrations are added. */
-const DB_VERSION = '1.3.0';
+const DB_VERSION = '1.4.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;
@@ -51,13 +51,17 @@ try {
 }
 
 foreach ($data['plugins'] as $plugin) {
-    $result = $syncer->upsert($plugin);
+    $upsert = $syncer->upsert($plugin);
 
-    match ($result) {
+    match ($upsert['result']) {
         'inserted'  => ++$inserted,
         'updated'   => ++$updated,
         default     => ++$unchanged,
     };
+
+    if ($upsert['plugin_id'] > 0 && !empty($plugin['versions'])) {
+        $syncer->syncVersions($upsert['plugin_id'], $plugin['versions']);
+    }
 }
 
 printf(

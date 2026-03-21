@@ -40,6 +40,10 @@ class Migrations
             $this->migrate130();
         }
 
+        if (version_compare($stored, '1.4.0', '<')) {
+            $this->migrate140();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -93,6 +97,41 @@ class Migrations
     // -------------------------------------------------------------------------
     // Migration routines (one method per version, never modified)
     // -------------------------------------------------------------------------
+
+    /**
+     * 1.4.0 — Add author/homepage/icons columns to plugin; create plugin_version table.
+     *
+     * plugin_version stores every known release ZIP and its optional test date,
+     * replacing the plugin_testdate field on the parent table.
+     */
+    private function migrate140(): void
+    {
+        $this->db->query(
+            "ALTER TABLE `plugin`
+                 ADD COLUMN IF NOT EXISTS `plugin_author`
+                     varchar(250) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+                 ADD COLUMN IF NOT EXISTS `plugin_author_profile`
+                     varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                 ADD COLUMN IF NOT EXISTS `plugin_homepage`
+                     varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                 ADD COLUMN IF NOT EXISTS `plugin_short_description`
+                     text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL,
+                 ADD COLUMN IF NOT EXISTS `plugin_icons`
+                     text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL"
+        );
+
+        $this->db->query(
+            "CREATE TABLE IF NOT EXISTS `plugin_version` (
+                `plugin_id`              bigint(20) unsigned NOT NULL,
+                `plugin_version`         varchar(250) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+                `plugin_version_zip`     varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+                `plugin_version_tested`  datetime DEFAULT NULL,
+                PRIMARY KEY (`plugin_id`, `plugin_version`),
+                CONSTRAINT `plugin_version_ibfk_1`
+                    FOREIGN KEY (`plugin_id`) REFERENCES `plugin` (`plugin_id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
+        );
+    }
 
     /**
      * 1.3.0 — Add plugin_source column to track the origin of each plugin record.

@@ -6,6 +6,9 @@ declare(strict_types=1);
  * Synchronizes plugin data from the WordPress.org API into the local database.
  *
  * Uses INSERT … ON DUPLICATE KEY UPDATE so each plugin requires a single query.
+ * The LAST_INSERT_ID(plugin_id) trick ensures insert_id is always populated,
+ * regardless of whether the row was inserted or updated.
+ *
  * affected_rows returns 1 (inserted), 2 (updated), or 0 (unchanged).
  */
 class PluginSync
@@ -19,32 +22,36 @@ class PluginSync
      *
      * @param array<string, mixed> $plugin Raw plugin array from the WordPress API.
      *
-     * @return 'inserted'|'updated'|'unchanged'
+     * @return array{result: 'inserted'|'updated'|'unchanged', plugin_id: int}
      */
-    public function upsert(array $plugin): string
+    public function upsert(array $plugin): array
     {
-        $slug                    = (string) ($plugin['slug']                     ?? '');
-        $version                 = (string) ($plugin['version']                  ?? '');
-        $installs                = (int)    ($plugin['active_installs']          ?? 0);
-        $zip                     = (string) ($plugin['download_link']            ?? '');
-        $name                    = (string) ($plugin['name']                     ?? '');
-        $requires                = (string) ($plugin['requires']                 ?? '');
-        $tested                  = (string) ($plugin['tested']                   ?? '');
-        $requiresPhp             = (string) ($plugin['requires_php']             ?? '');
-        $requiresPlugins         = json_encode($plugin['requires_plugins']       ?? []);
-        $rating                  = (int)    ($plugin['rating']                   ?? 0);
-        $numRatings              = (int)    ($plugin['num_ratings']              ?? 0);
-        $supportThreads          = (int)    ($plugin['support_threads']          ?? 0);
-        $supportThreadsResolved  = (int)    ($plugin['support_threads_resolved'] ?? 0);
-        $downloaded              = (int)    ($plugin['downloaded']               ?? 0);
-        $lastUpdated             = $this->parseDateTime((string) ($plugin['last_updated'] ?? ''));
-        $added                   = (string) ($plugin['added']                    ?? '');
+        $slug                 = (string) ($plugin['slug']                     ?? '');
+        $version              = (string) ($plugin['version']                  ?? '');
+        $installs             = (int)    ($plugin['active_installs']          ?? 0);
+        $zip                  = (string) ($plugin['download_link']            ?? '');
+        $name                 = (string) ($plugin['name']                     ?? '');
+        $requires             = (string) ($plugin['requires']                 ?? '');
+        $tested               = (string) ($plugin['tested']                   ?? '');
+        $requiresPhp          = (string) ($plugin['requires_php']             ?? '');
+        $requiresPlugins      = json_encode($plugin['requires_plugins']       ?? []);
+        $rating               = (int)    ($plugin['rating']                   ?? 0);
+        $numRatings           = (int)    ($plugin['num_ratings']              ?? 0);
+        $supportThreads       = (int)    ($plugin['support_threads']          ?? 0);
+        $supportThreadsResolved = (int)  ($plugin['support_threads_resolved'] ?? 0);
+        $downloaded           = (int)    ($plugin['downloaded']               ?? 0);
+        $lastUpdated          = $this->parseDateTime((string) ($plugin['last_updated']    ?? ''));
+        $added                = (string) ($plugin['added']                    ?? '');
+        $source               = 'wordpress.org';
+        $author               = (string) ($plugin['author']                   ?? '');
+        $authorProfile        = (string) ($plugin['author_profile']           ?? '');
+        $homepage             = (string) ($plugin['homepage']                 ?? '');
+        $shortDescription     = (string) ($plugin['short_description']        ?? '');
+        $icons                = json_encode($plugin['icons']                  ?? []);
 
         if ($slug === '') {
-            return 'unchanged';
+            return ['result' => 'unchanged', 'plugin_id' => 0];
         }
-
-        $source = 'wordpress.org';
 
         $stmt = $this->db->prepare(
             'INSERT INTO plugin (
@@ -53,9 +60,11 @@ class PluginSync
                 plugin_requires_plugins, plugin_rating, plugin_num_ratings,
                 plugin_support_threads, plugin_support_threads_resolved,
                 plugin_downloaded, plugin_last_updated, plugin_added,
-                plugin_source
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                plugin_source, plugin_author, plugin_author_profile,
+                plugin_homepage, plugin_short_description, plugin_icons
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
+                plugin_id                       = LAST_INSERT_ID(plugin_id),
                 plugin_version                  = VALUES(plugin_version),
                 plugin_installs                 = VALUES(plugin_installs),
                 plugin_zip                      = VALUES(plugin_zip),
@@ -70,11 +79,16 @@ class PluginSync
                 plugin_support_threads_resolved = VALUES(plugin_support_threads_resolved),
                 plugin_downloaded               = VALUES(plugin_downloaded),
                 plugin_last_updated             = VALUES(plugin_last_updated),
-                plugin_added                    = VALUES(plugin_added)'
+                plugin_added                    = VALUES(plugin_added),
+                plugin_author                   = VALUES(plugin_author),
+                plugin_author_profile           = VALUES(plugin_author_profile),
+                plugin_homepage                 = VALUES(plugin_homepage),
+                plugin_short_description        = VALUES(plugin_short_description),
+                plugin_icons                    = VALUES(plugin_icons)'
         );
 
         $stmt->bind_param(
-            'ssissssssiiiiisss',
+            'ssissssssiiiiissssssss',
             $slug,
             $version,
             $installs,
@@ -91,18 +105,57 @@ class PluginSync
             $downloaded,
             $lastUpdated,
             $added,
-            $source
+            $source,
+            $author,
+            $authorProfile,
+            $homepage,
+            $shortDescription,
+            $icons
         );
 
         $stmt->execute();
-        $affected = $this->db->affected_rows;
+        $affected  = $this->db->affected_rows;
+        $pluginId  = (int) $this->db->insert_id;
         $stmt->close();
 
-        return match ($affected) {
+        $result = match ($affected) {
             1       => 'inserted',
             2       => 'updated',
             default => 'unchanged',
         };
+
+        return ['result' => $result, 'plugin_id' => $pluginId];
+    }
+
+    /**
+     * Inserts missing version records for a plugin.
+     *
+     * Skips 'trunk' since it is a floating pointer, not a discrete release.
+     * Uses INSERT IGNORE because ZIP URLs for released versions are immutable.
+     * The plugin_version_tested column defaults to NULL and is updated externally
+     * when a test run completes.
+     *
+     * @param int                  $pluginId Plugin primary key.
+     * @param array<string, mixed> $versions Associative array of version => zip_url.
+     */
+    public function syncVersions(int $pluginId, array $versions): void
+    {
+        foreach ($versions as $ver => $zip) {
+            if ($ver === 'trunk') {
+                continue;
+            }
+
+            $ver  = (string) $ver;
+            $zip  = (string) $zip;
+
+            $stmt = $this->db->prepare(
+                'INSERT IGNORE INTO plugin_version (plugin_id, plugin_version, plugin_version_zip)
+                 VALUES (?, ?, ?)'
+            );
+            $stmt->bind_param('iss', $pluginId, $ver, $zip);
+            $stmt->execute();
+            $stmt->close();
+        }
     }
 
     /**
