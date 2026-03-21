@@ -71,6 +71,10 @@ class WpPluginFetcher
 
         $data = json_decode((string) $response, true);
 
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new RuntimeException('JSON decode failed: ' . json_last_error_msg());
+        }
+
         if (!is_array($data) || !isset($data['plugins'], $data['info'])) {
             throw new RuntimeException('Unexpected WordPress API response format.');
         }

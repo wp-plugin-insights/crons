@@ -13,6 +13,7 @@ Three crons work in pipeline:
 | `fetch-new-plugins.php` | Every 5 min | Fetches the 200 most recently updated plugins (`browse=updated`) and upserts them with their version history |
 | `fetch-all-plugins.php` | Daily at 02:00 UTC | Full sweep of all ~62 000 plugins (`browse=new`); inserts new ones and refreshes all data |
 | `validate-plugins.php` | Every minute | Downloads and extracts ZIP files for pending versions, validates `readme.txt`, and publishes to RabbitMQ |
+| `cleanup-plugins.php` | Every hour | Deletes extracted plugin directories older than 6 hours and clears `plugin_version_path` in the database |
 
 ---
 
@@ -95,6 +96,7 @@ Both files are gitignored.
 | `plugin_version_zip` | varchar(500) | download URL for that release |
 | `plugin_version_path` | varchar(500) | absolute path to the extracted directory; NULL until validated |
 | `plugin_version_tested` | datetime | set when validation completes; NULL = pending |
+| `plugin_version_path` | varchar(500) | absolute path to the extracted directory; NULL until validated, reset to NULL after cleanup |
 
 `trunk` is skipped — it is a floating pointer, not a discrete release.
 
@@ -172,6 +174,8 @@ Six unit files, two per cron:
 | `plugininsight-fetch-all-plugins.timer` | Daily at 02:00 UTC |
 | `plugininsight-validate-plugins.service` | Runs `validate-plugins.php` |
 | `plugininsight-validate-plugins.timer` | Every minute |
+| `plugininsight-cleanup-plugins.service` | Runs `cleanup-plugins.php` |
+| `plugininsight-cleanup-plugins.timer` | Every hour |
 
 ### Install
 
@@ -182,6 +186,7 @@ systemctl daemon-reload
 systemctl enable --now plugininsight-fetch-new-plugins.timer
 systemctl enable --now plugininsight-fetch-all-plugins.timer
 systemctl enable --now plugininsight-validate-plugins.timer
+systemctl enable --now plugininsight-cleanup-plugins.timer
 ```
 
 ### Verify
@@ -194,11 +199,13 @@ systemctl list-timers 'plugininsight-*'
 systemctl start plugininsight-fetch-new-plugins.service
 systemctl start plugininsight-fetch-all-plugins.service
 systemctl start plugininsight-validate-plugins.service
+systemctl start plugininsight-cleanup-plugins.service
 
 # Follow live output
 journalctl -u plugininsight-fetch-new-plugins.service -f
 journalctl -u plugininsight-fetch-all-plugins.service -f
 journalctl -u plugininsight-validate-plugins.service -f
+journalctl -u plugininsight-cleanup-plugins.service -f
 ```
 
 ### Disable
@@ -207,6 +214,7 @@ journalctl -u plugininsight-validate-plugins.service -f
 systemctl disable --now plugininsight-fetch-new-plugins.timer
 systemctl disable --now plugininsight-fetch-all-plugins.timer
 systemctl disable --now plugininsight-validate-plugins.timer
+systemctl disable --now plugininsight-cleanup-plugins.timer
 ```
 
 ---

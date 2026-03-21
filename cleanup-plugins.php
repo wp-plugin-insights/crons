@@ -19,7 +19,11 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../dbcon.php';
+require_once __DIR__ . '/src/Migrations.php';
 require_once __DIR__ . '/src/PluginCleaner.php';
+
+/** Current schema version. */
+const DB_VERSION = '1.5.0';
 
 /** Directories older than this many hours will be deleted. */
 const EXPIRE_HOURS = 6;
@@ -30,6 +34,9 @@ const CLEANUP_BATCH = 500;
 // ---------------------------------------------------------------------------
 // Process
 // ---------------------------------------------------------------------------
+
+$migrations = new Migrations($db);
+$migrations->run(DB_VERSION);
 
 $cleaner = new PluginCleaner($db);
 $expired = $cleaner->getExpiredBatch(EXPIRE_HOURS, CLEANUP_BATCH);
