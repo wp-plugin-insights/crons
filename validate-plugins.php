@@ -51,6 +51,7 @@ $publisher = new RabbitMqPublisher(
     RABBITMQ_USER,
     RABBITMQ_PASS,
     RABBITMQ_VHOST,
+    RABBITMQ_EXCHANGE,
     RABBITMQ_QUEUE
 );
 
