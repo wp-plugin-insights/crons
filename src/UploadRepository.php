@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use mysqli;
+
 /**
  * Data-access layer for the plugin_upload table.
  *
@@ -10,6 +14,9 @@ declare(strict_types=1);
  */
 class UploadRepository
 {
+    /**
+     * @param mysqli $db Active database connection.
+     */
     public function __construct(private readonly mysqli $db)
     {
     }
@@ -17,6 +24,8 @@ class UploadRepository
     /**
      * Inserts a new upload record with status 'pending'.
      *
+     * @param string $uuid        UUID v4 that uniquely identifies this upload.
+     * @param string $ip          IP address of the uploader.
      * @param array{
      *     plugin_slug: string|null,
      *     plugin_name: string|null,
@@ -27,6 +36,7 @@ class UploadRepository
      *     plugin_requires_php: string|null,
      *     plugin_description: string|null,
      * } $meta Parsed plugin metadata from ZipExtractor.
+     * @param string $extractPath Absolute path to the extracted plugin directory.
      */
     public function insert(string $uuid, string $ip, array $meta, string $extractPath): void
     {
@@ -59,9 +69,11 @@ class UploadRepository
     }
 
     /**
-     * Updates the status of an upload record.
+     * Updates the status (and optionally the error message) of an upload record.
      *
-     * @param string $status One of: 'pending', 'queued', 'done', 'error'.
+     * @param string      $uuid   UUID of the upload to update.
+     * @param string      $status New status: 'pending', 'queued', 'done', or 'error'.
+     * @param string|null $error  Optional error message; only stored when $status is 'error'.
      */
     public function updateStatus(string $uuid, string $status, ?string $error = null): void
     {
@@ -88,7 +100,9 @@ class UploadRepository
     /**
      * Returns a single upload record by UUID, or null if not found.
      *
-     * @return array<string, mixed>|null
+     * @param  string $uuid UUID of the upload to look up.
+     *
+     * @return array<string, mixed>|null Row from plugin_upload, or null.
      */
     public function findByUuid(string $uuid): ?array
     {
@@ -108,6 +122,8 @@ class UploadRepository
      * Returns the most recent $limit upload records, newest first.
      *
      * Used by the admin panel to display a live overview of API activity.
+     *
+     * @param  int $limit Maximum number of rows to return.
      *
      * @return list<array<string, mixed>>
      */
@@ -137,6 +153,11 @@ class UploadRepository
      * Returns the number of uploads from the given IP within the last $windowSeconds.
      *
      * Used to enforce per-IP rate limits on the web upload form.
+     *
+     * @param string $ip            Uploader IP address.
+     * @param int    $windowSeconds Look-back window in seconds (default 300 = 5 min).
+     *
+     * @return int Number of uploads within the window.
      */
     public function countRecentByIp(string $ip, int $windowSeconds = 300): int
     {
@@ -159,6 +180,8 @@ class UploadRepository
      *
      * These are uploads where the initial RabbitMQ publish failed and need
      * to be retried by the validate-plugins cron.
+     *
+     * @param  int $limit Maximum number of rows to return.
      *
      * @return list<array<string, mixed>>
      */

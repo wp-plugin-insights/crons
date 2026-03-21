@@ -1,81 +1,53 @@
 # PluginInsight Crons
 
-PHP CLI scripts that fetch, synchronize, and analyze WordPress.org plugin data.
+PHP CLI scripts that fetch, synchronise, and enrich WordPress plugin data.
 
 ---
 
 ## Overview
 
-Three crons work in pipeline:
-
 | Script | Frequency | Purpose |
 |---|---|---|
-| `fetch-new-plugins.php` | Every 5 min | Fetches the 200 most recently updated plugins (`browse=updated`) and upserts them with their version history |
-| `fetch-all-plugins.php` | Daily at 02:00 UTC | Full sweep of all ~62 000 plugins (`browse=new`); inserts new ones and refreshes all data |
-| `validate-plugins.php` | Every minute | Downloads and extracts ZIP files for pending versions, validates `readme.txt`, and publishes to RabbitMQ |
-| `cleanup-plugins.php` | Every hour | Deletes extracted plugin directories older than 6 hours and clears `plugin_version_path` in the database |
+| `fetch-new-plugins.php` | Every 5 min | Fetches the 200 most recently updated plugins (`browse=updated`) and upserts metadata + version history |
+| `fetch-all-plugins.php` | Daily 02:00 UTC | Full sweep of all ~62 000 plugins (`browse=new`); inserts new records and refreshes all metadata |
+| `validate-plugins.php` | Every 1 min | Downloads and extracts ZIP files for pending versions, parses `readme.txt`, publishes to RabbitMQ |
+| `cleanup-plugins.php` | Every 1 hr | Deletes extracted plugin directories older than 6 hours; resets `plugin_version_path` to NULL |
+| `fetch-wp-versions.php` | Every 1 hr | Fetches WordPress core release list from WP.org; stores one row per major.minor branch in `site_setting` |
+| `fetch-wp-locales.php` | Weekly (Mon 00:00 UTC) | Fetches WordPress locale metadata from WP.org translations API; upserts one row per language code into `wp_locale` |
 
 ---
 
 ## Requirements
 
-- PHP 8.3–8.5 with extensions: `mysqli`, `curl`, `zip`, `amqp`
-- MariaDB 11.4+
-- RabbitMQ with exchange `plugin.analysis.all` (fanout)
-
-Install the AMQP extension:
-```bash
-apt-get install php8.4-amqp
-```
-
----
-
-## Configuration
-
-Two files must be created from their `.example.php` templates before running any script:
-
-### `../dbcon.php`
-Database connection — lives one level above the repo root. See the host server's `/webs/plugininsight/database.txt` for credentials.
-
-### `rabbitmq.php`
-```bash
-cp rabbitmq.example.php rabbitmq.php
-# then edit rabbitmq.php with real credentials
-```
-
-| Constant | Default | Description |
-|---|---|---|
-| `RABBITMQ_HOST` | `127.0.0.1` | Broker host |
-| `RABBITMQ_PORT` | `5672` | Broker port |
-| `RABBITMQ_USER` | — | Login |
-| `RABBITMQ_PASS` | — | Password |
-| `RABBITMQ_VHOST` | `/` | Virtual host |
-| `RABBITMQ_EXCHANGE` | `plugin.analysis.all` | Fanout exchange to publish to |
-| `RABBITMQ_QUEUE` | `plugin-validation` | Routing key (ignored by fanout) |
-
-Both files are gitignored.
+- **PHP 8.3–8.5** with extensions: `mysqli`, `curl`, `zip`, `amqp`
+- **MariaDB 11.4+**
+- **RabbitMQ** with fanout exchange `plugin.analysis.all`
 
 ---
 
 ## Database schema
 
-### `plugin` — one row per plugin
+Current version: **`DB_VERSION = 1.9.0`** (stored in `plugin_schema_meta`).
+
+Migrations run automatically on every script startup and are always idempotent.
+
+### `plugin` — one row per plugin slug
 
 | Column | Type | Source |
 |---|---|---|
 | `plugin_id` | bigint PK | auto |
 | `plugin_slug` | varchar(250) UNIQUE | `slug` |
-| `plugin_version` | varchar(250) | `version` |
+| `plugin_version` | varchar(250) | `version` (latest) |
 | `plugin_installs` | int unsigned | `active_installs` |
 | `plugin_zip` | varchar(500) | `download_link` |
-| `plugin_name` | varchar(250) | `name` |
-| `plugin_author` | varchar(250) | `author` (HTML) |
+| `plugin_name` | varchar(250) | `name` (may contain HTML entities) |
+| `plugin_author` | varchar(250) | `author` (HTML fragment) |
 | `plugin_author_profile` | varchar(500) | `author_profile` |
 | `plugin_homepage` | varchar(500) | `homepage` |
 | `plugin_requires` | varchar(20) | `requires` |
 | `plugin_tested` | varchar(20) | `tested` |
 | `plugin_requires_php` | varchar(20) | `requires_php` |
-| `plugin_requires_plugins` | text (JSON) | `requires_plugins` |
+| `plugin_requires_plugins` | text JSON | `requires_plugins` |
 | `plugin_short_description` | text | `short_description` |
 | `plugin_rating` | tinyint unsigned | `rating` (0–100) |
 | `plugin_num_ratings` | int unsigned | `num_ratings` |
@@ -84,7 +56,7 @@ Both files are gitignored.
 | `plugin_downloaded` | bigint unsigned | `downloaded` |
 | `plugin_last_updated` | datetime | `last_updated` |
 | `plugin_added` | date | `added` |
-| `plugin_icons` | text (JSON) | `icons` |
+| `plugin_icons` | text JSON | `icons` |
 | `plugin_source` | varchar(250) | hardcoded `wordpress.org` |
 
 ### `plugin_version` — one row per (plugin, version)
@@ -92,19 +64,55 @@ Both files are gitignored.
 | Column | Type | Notes |
 |---|---|---|
 | `plugin_id` | bigint FK | references `plugin.plugin_id` |
-| `plugin_version` | varchar(250) PK | release tag, e.g. `2.7.3` |
-| `plugin_version_zip` | varchar(500) | download URL for that release |
-| `plugin_version_path` | varchar(500) | absolute path to the extracted directory; NULL until validated |
+| `plugin_version` | varchar(250) PK | release tag, e.g. `2.7.3`; `trunk` is skipped |
+| `plugin_version_zip` | varchar(500) | download URL |
+| `plugin_version_path` | varchar(500) | absolute path to extracted directory; NULL until validated, reset to NULL after cleanup |
 | `plugin_version_tested` | datetime | set when validation completes; NULL = pending |
-| `plugin_version_path` | varchar(500) | absolute path to the extracted directory; NULL until validated, reset to NULL after cleanup |
 
-`trunk` is skipped — it is a floating pointer, not a discrete release.
+### `pluginresult` — one row per (plugin, version, runner, run)
+
+| Column | Type | Notes |
+|---|---|---|
+| `plugin_id` | bigint FK | references `plugin.plugin_id` |
+| `plugin_version` | varchar(250) | version string |
+| `runner_id` | int FK | references `runner.runner_id` |
+| `pluginresult_result` | longtext JSON | full runner output; must satisfy `JSON_VALID` |
+| `pluginresult_date` | datetime | when the result was stored |
+
+### `runner` — one row per RabbitMQ consumer worker
+
+| Column | Type | Notes |
+|---|---|---|
+| `runner_id` | int PK | auto |
+| `runner_name` | varchar(100) | display name |
+| `runner_slug` | varchar(50) UNIQUE | machine identifier |
+| `runner_queue` | varchar(250) | RabbitMQ queue name |
+| `runner_is_active` | tinyint | 1 = active |
+| `created_at` | datetime | |
+
+Default runners inserted on first migration: `ai`, `basic`, `security`.
+
+### `site_setting` — key-value runtime config
+
+| Key | Value |
+|---|---|
+| `api_active` | `1` / `0` — whether the upload API accepts new requests |
+| `api_hostname` | hostname shown on the API docs page |
+| `wp_versions` | JSON array of `{version, php_min, mysql_min}`, one per major.minor WP branch, newest first |
+
+### `wp_locale` — WordPress locale metadata (since 1.9.0)
+
+| Column | Type | Notes |
+|---|---|---|
+| `locale_language` | varchar(20) PK | language code, e.g. `es`, `fr`, `zh_CN` |
+| `locale_english_name` | varchar(150) | e.g. `Spanish (Spain)` |
+| `locale_native_name` | varchar(150) | e.g. `Español` |
+| `locale_synced_at` | datetime | updated automatically on each upsert |
 
 ### Schema versioning
 
-Migrations run automatically on every script startup. The current version (`DB_VERSION = 1.5.0`) is stored in `plugin_schema_meta` and compared against the constant; pending migrations are applied in order.
-
 To reset the validation queue:
+
 ```sql
 UPDATE plugin_version SET plugin_version_tested = NULL, plugin_version_path = NULL;
 ```
@@ -114,10 +122,10 @@ UPDATE plugin_version SET plugin_version_tested = NULL, plugin_version_path = NU
 ## RabbitMQ topology
 
 ```
-plugin.analysis.all  (fanout)
-    ├── plugin.analysis.ai       (fanout) → queue: plugin.analysis.ai
-    ├── plugin.analysis.basic    (fanout) → queue: plugin.analysis.basic
-    └── plugin.analysis.security (fanout) → queue: plugin.analysis.security
+plugin.analysis.all  (fanout exchange)
+    ├── plugin.analysis.ai       → queue: plugin.analysis.ai
+    ├── plugin.analysis.basic    → queue: plugin.analysis.basic
+    └── plugin.analysis.security → queue: plugin.analysis.security
 ```
 
 Each validated plugin version is published as a persistent JSON message:
@@ -131,16 +139,12 @@ Each validated plugin version is published as a persistent JSON message:
 }
 ```
 
-To check queue depths:
 ```bash
+# Check queue depths
 rabbitmqctl list_queues name messages_ready
-```
 
-To purge all queues:
-```bash
+# Purge a queue
 rabbitmqadmin purge queue name=plugin.analysis.ai
-rabbitmqadmin purge queue name=plugin.analysis.basic
-rabbitmqadmin purge queue name=plugin.analysis.security
 ```
 
 ---
@@ -150,71 +154,445 @@ rabbitmqadmin purge queue name=plugin.analysis.security
 ```bash
 cd /webs/plugininsight/crons
 
-# Sync recently updated plugins (page 1 only)
-php8.4 fetch-new-plugins.php
-
-# Full sync — all plugins, all pages (takes several minutes)
-php8.4 fetch-all-plugins.php
-
-# Validate a batch of 10 pending plugin versions
-php8.4 validate-plugins.php
+php8.4 fetch-new-plugins.php      # sync recently updated plugins
+php8.4 fetch-all-plugins.php      # full sync (takes several minutes)
+php8.4 validate-plugins.php       # validate a batch of pending versions
+php8.4 cleanup-plugins.php        # delete stale extracted directories
+php8.4 fetch-wp-versions.php      # refresh WP core version list
+php8.4 fetch-wp-locales.php       # refresh WP locale list
 ```
 
 ---
 
-## Systemd setup
+## Migrating to a new server (copy-paste guide)
 
-Six unit files, two per cron:
+Everything below is designed so that an operator who has never seen this project
+before can get it running on a fresh Debian/Ubuntu server by following the steps
+in order. Commands that must be customised are marked with `# ← CHANGE THIS`.
 
-| File | Purpose |
-|---|---|
-| `plugininsight-fetch-new-plugins.service` | Runs `fetch-new-plugins.php` |
-| `plugininsight-fetch-new-plugins.timer` | Every 5 minutes |
-| `plugininsight-fetch-all-plugins.service` | Runs `fetch-all-plugins.php` |
-| `plugininsight-fetch-all-plugins.timer` | Daily at 02:00 UTC |
-| `plugininsight-validate-plugins.service` | Runs `validate-plugins.php` |
-| `plugininsight-validate-plugins.timer` | Every minute |
-| `plugininsight-cleanup-plugins.service` | Runs `cleanup-plugins.php` |
-| `plugininsight-cleanup-plugins.timer` | Every hour |
+### 1. Install system packages
 
-### Install
+```bash
+apt-get update
+apt-get install -y \
+    php8.4 php8.4-cli php8.4-mysqli php8.4-curl php8.4-zip php8.4-amqp \
+    mariadb-server \
+    rabbitmq-server \
+    git
+```
 
-Unit files are already installed in `/etc/systemd/system/`. Enable all timers:
+### 2. Create the system user
+
+The cron scripts run as a dedicated unprivileged user. Create it once:
+
+```bash
+useradd --system --no-create-home --shell /usr/sbin/nologin plugininsight
+```
+
+### 3. Create the directory structure
+
+```bash
+mkdir -p /webs/plugininsight/{zipfiles,extracted,logs}
+mkdir -p /webs/plugininsight/extracted/uploads
+
+# Clone or copy the project (adjust to your source)
+# git clone <repo-url> /webs/plugininsight   # ← CHANGE THIS
+
+chown -R plugininsight:plugininsight /webs/plugininsight
+chmod -R 750 /webs/plugininsight
+```
+
+The layout must be:
+
+```
+/webs/plugininsight/
+├── www.plugininsight.com/    # frontend
+├── api.plugininsight.com/    # upload API
+├── crons/                    # this directory
+├── extracted/                # plugin extraction target
+│   └── uploads/              # API-uploaded ZIPs extracted here
+├── zipfiles/                 # temporary ZIP staging (API uploads)
+├── logs/                     # application logs
+├── dbcon.php                 # shared DB connection
+└── secrets.php               # app secrets (HMAC key, mail from, base URL)
+```
+
+### 4. Set up the database
+
+```bash
+# Start MariaDB and secure it
+systemctl enable --now mariadb
+mysql_secure_installation
+```
+
+Then create the database and user:
+
+```sql
+-- Run as root: mysql -u root
+CREATE DATABASE plugininsight CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'plugininsight'@'127.0.0.1' IDENTIFIED BY 'CHANGE_PASSWORD_HERE';  -- ← CHANGE THIS
+GRANT ALL PRIVILEGES ON plugininsight.* TO 'plugininsight'@'127.0.0.1';
+FLUSH PRIVILEGES;
+```
+
+The schema is created automatically on first run via migrations.
+
+### 5. Create `dbcon.php`
+
+```bash
+cat > /webs/plugininsight/dbcon.php << 'EOF'
+<?php
+
+declare(strict_types=1);
+
+const DB_HOST    = '127.0.0.1';
+const DB_PORT    = 3306;
+const DB_NAME    = 'plugininsight';
+const DB_USER    = 'plugininsight';
+const DB_PASS    = 'CHANGE_PASSWORD_HERE';   // ← CHANGE THIS
+const DB_CHARSET = 'utf8mb4';
+
+function db_connect(): mysqli
+{
+    $db = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME, DB_PORT);
+
+    if ($db->connect_errno) {
+        throw new RuntimeException(
+            'DB connection failed: ' . $db->connect_error,
+            $db->connect_errno
+        );
+    }
+
+    $db->set_charset(DB_CHARSET);
+
+    return $db;
+}
+EOF
+chown plugininsight:plugininsight /webs/plugininsight/dbcon.php
+chmod 640 /webs/plugininsight/dbcon.php
+```
+
+### 6. Create `secrets.php`
+
+```bash
+cat > /webs/plugininsight/secrets.php << 'EOF'
+<?php
+
+declare(strict_types=1);
+
+/** HMAC key for password-reset token hashing. */
+const APP_SECRET = 'CHANGE_TO_64_HEX_CHARS';   // ← CHANGE THIS (openssl rand -hex 32)
+
+/** Address used in the From: header of system e-mails. */
+const MAIL_FROM = 'noreply@plugininsight.com';  // ← CHANGE THIS
+
+/** Public base URL (no trailing slash). */
+const APP_URL = 'https://www.plugininsight.com'; // ← CHANGE THIS
+EOF
+chown plugininsight:plugininsight /webs/plugininsight/secrets.php
+chmod 640 /webs/plugininsight/secrets.php
+```
+
+Generate the `APP_SECRET` value:
+
+```bash
+openssl rand -hex 32
+```
+
+### 7. Set up RabbitMQ
+
+```bash
+systemctl enable --now rabbitmq-server
+
+# Create a dedicated vhost and user (replace passwords)
+rabbitmqctl add_vhost /
+rabbitmqctl add_user plugininsight CHANGE_RABBITMQ_PASS   # ← CHANGE THIS
+rabbitmqctl set_permissions -p / plugininsight ".*" ".*" ".*"
+
+# Enable the management UI (optional but useful)
+rabbitmq-plugins enable rabbitmq_management
+```
+
+Then declare the fanout exchange and queues. Runners create their own queues
+on startup, but you can pre-declare them:
+
+```bash
+rabbitmqadmin declare exchange name=plugin.analysis.all type=fanout durable=true
+rabbitmqadmin declare queue    name=plugin.analysis.ai       durable=true
+rabbitmqadmin declare queue    name=plugin.analysis.basic    durable=true
+rabbitmqadmin declare queue    name=plugin.analysis.security durable=true
+rabbitmqadmin declare binding  source=plugin.analysis.all destination=plugin.analysis.ai
+rabbitmqadmin declare binding  source=plugin.analysis.all destination=plugin.analysis.basic
+rabbitmqadmin declare binding  source=plugin.analysis.all destination=plugin.analysis.security
+```
+
+### 8. Create `crons/rabbitmq.php`
+
+```bash
+cat > /webs/plugininsight/crons/rabbitmq.php << 'EOF'
+<?php
+
+declare(strict_types=1);
+
+const RABBITMQ_HOST     = '127.0.0.1';
+const RABBITMQ_PORT     = 5672;
+const RABBITMQ_USER     = 'plugininsight';       // ← CHANGE THIS if different
+const RABBITMQ_PASS     = 'CHANGE_RABBITMQ_PASS'; // ← CHANGE THIS
+const RABBITMQ_VHOST    = '/';
+const RABBITMQ_EXCHANGE = 'plugin.analysis.all';
+const RABBITMQ_QUEUE    = 'plugin-validation';
+EOF
+chown plugininsight:plugininsight /webs/plugininsight/crons/rabbitmq.php
+chmod 640 /webs/plugininsight/crons/rabbitmq.php
+```
+
+### 9. Install systemd unit files
+
+Create all 12 files (6 services + 6 timers):
+
+```bash
+# ── fetch-new-plugins ────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-fetch-new-plugins.service << 'EOF'
+[Unit]
+Description=PluginInsight — fetch new plugins from WordPress.org API
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/fetch-new-plugins.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-fetch-new-plugins.timer << 'EOF'
+[Unit]
+Description=PluginInsight — fetch new plugins every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── fetch-all-plugins ────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-fetch-all-plugins.service << 'EOF'
+[Unit]
+Description=PluginInsight — full sync of all plugins from WordPress.org API
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/fetch-all-plugins.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1800
+EOF
+
+cat > /etc/systemd/system/plugininsight-fetch-all-plugins.timer << 'EOF'
+[Unit]
+Description=PluginInsight — full plugin sync once per day
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── validate-plugins ─────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-validate-plugins.service << 'EOF'
+[Unit]
+Description=PluginInsight — validate plugin ZIPs and publish to RabbitMQ
+After=network-online.target mariadb.service rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/validate-plugins.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-validate-plugins.timer << 'EOF'
+[Unit]
+Description=PluginInsight — validate plugin ZIPs every minute
+
+[Timer]
+OnCalendar=*:0/1
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── cleanup-plugins ──────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-cleanup-plugins.service << 'EOF'
+[Unit]
+Description=PluginInsight — remove extracted plugin directories older than 6 hours
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/cleanup-plugins.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-cleanup-plugins.timer << 'EOF'
+[Unit]
+Description=PluginInsight — cleanup extracted plugin directories every hour
+
+[Timer]
+OnCalendar=*:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── fetch-wp-versions ────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-fetch-wp-versions.service << 'EOF'
+[Unit]
+Description=PluginInsight — fetch WordPress core version list
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/fetch-wp-versions.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-fetch-wp-versions.timer << 'EOF'
+[Unit]
+Description=PluginInsight — fetch WordPress core versions every hour
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── fetch-wp-locales ─────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-fetch-wp-locales.service << 'EOF'
+[Unit]
+Description=PluginInsight — fetch WordPress locale list
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php8.4 /webs/plugininsight/crons/fetch-wp-locales.php
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/crons
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-fetch-wp-locales.timer << 'EOF'
+[Unit]
+Description=PluginInsight — fetch WordPress locales once per week
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+```
+
+### 10. Enable all timers
 
 ```bash
 systemctl daemon-reload
+
 systemctl enable --now plugininsight-fetch-new-plugins.timer
 systemctl enable --now plugininsight-fetch-all-plugins.timer
 systemctl enable --now plugininsight-validate-plugins.timer
 systemctl enable --now plugininsight-cleanup-plugins.timer
+systemctl enable --now plugininsight-fetch-wp-versions.timer
+systemctl enable --now plugininsight-fetch-wp-locales.timer
 ```
 
-### Verify
+Verify all timers are scheduled:
 
 ```bash
-# All timers and next trigger times
 systemctl list-timers 'plugininsight-*'
+```
 
-# Run a job immediately
+### 11. Smoke-test
+
+Run each script once manually as the service user to confirm connectivity:
+
+```bash
+sudo -u plugininsight php8.4 /webs/plugininsight/crons/fetch-wp-versions.php
+sudo -u plugininsight php8.4 /webs/plugininsight/crons/fetch-wp-locales.php
+sudo -u plugininsight php8.4 /webs/plugininsight/crons/fetch-new-plugins.php
+sudo -u plugininsight php8.4 /webs/plugininsight/crons/validate-plugins.php
+sudo -u plugininsight php8.4 /webs/plugininsight/crons/cleanup-plugins.php
+```
+
+---
+
+## Day-to-day operations
+
+### Run a job immediately
+
+```bash
 systemctl start plugininsight-fetch-new-plugins.service
 systemctl start plugininsight-fetch-all-plugins.service
 systemctl start plugininsight-validate-plugins.service
 systemctl start plugininsight-cleanup-plugins.service
+systemctl start plugininsight-fetch-wp-versions.service
+systemctl start plugininsight-fetch-wp-locales.service
+```
 
-# Follow live output
+### Follow live output
+
+```bash
 journalctl -u plugininsight-fetch-new-plugins.service -f
 journalctl -u plugininsight-fetch-all-plugins.service -f
 journalctl -u plugininsight-validate-plugins.service -f
 journalctl -u plugininsight-cleanup-plugins.service -f
+journalctl -u plugininsight-fetch-wp-versions.service -f
+journalctl -u plugininsight-fetch-wp-locales.service -f
 ```
 
-### Disable
+### Disable all timers
 
 ```bash
-systemctl disable --now plugininsight-fetch-new-plugins.timer
-systemctl disable --now plugininsight-fetch-all-plugins.timer
-systemctl disable --now plugininsight-validate-plugins.timer
-systemctl disable --now plugininsight-cleanup-plugins.timer
+systemctl disable --now \
+  plugininsight-fetch-new-plugins.timer \
+  plugininsight-fetch-all-plugins.timer \
+  plugininsight-validate-plugins.timer \
+  plugininsight-cleanup-plugins.timer \
+  plugininsight-fetch-wp-versions.timer \
+  plugininsight-fetch-wp-locales.timer
 ```
 
 ---
@@ -222,5 +600,14 @@ systemctl disable --now plugininsight-cleanup-plugins.timer
 ## Code validation
 
 ```bash
-phpcs --standard=PSR12 src/ *.php
+cd /webs/plugininsight
+
+# PSR-12 style check
+vendor/bin/phpcs --standard=PSR12 crons/src/ crons/*.php
+
+# Static analysis (level 6)
+cd crons && php8.4 ../vendor/bin/phpstan analyse --level=6 --configuration=phpstan.neon
+
+# Syntax check a single file
+php8.4 -l crons/src/WpLocalesFetcher.php
 ```

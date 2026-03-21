@@ -1,0 +1,19 @@
+parameters:
+    level: 6
+    paths:
+        - .
+    excludePaths:
+        - vendor/ (?)
+    bootstrapFiles:
+        - ../dbcon.php
+        - src/Migrations.php
+        - src/WpPluginFetcher.php
+        - src/PluginSync.php
+        - src/ZipExtractor.php
+        - src/PluginValidator.php
+        - src/RabbitMqPublisher.php
+        - src/PluginCleaner.php
+        - src/UploadRepository.php
+        - src/WpVersionFetcher.php
+        - src/WpLocalesFetcher.php
+        - rabbitmq.php

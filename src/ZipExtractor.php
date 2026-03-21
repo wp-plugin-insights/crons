@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use finfo;
+use RuntimeException;
+use ZipArchive;
+
 /**
  * Validates, extracts, and parses WordPress plugin ZIP archives.
  *
@@ -70,15 +76,15 @@ class ZipExtractor
         $phpMeta    = $this->parseMainPluginFile($destDir);
 
         return [
-            'plugin_slug'        => $phpMeta['plugin_slug'],
-            'plugin_name'        => $phpMeta['plugin_name'] ?? $readmeMeta['plugin_name'],
-            'plugin_version'     => $phpMeta['plugin_version'],
-            'plugin_author'      => $phpMeta['plugin_author'],
-            'plugin_requires'    => $readmeMeta['requires_at_least'],
-            'plugin_tested'      => $readmeMeta['tested_up_to'],
+            'plugin_slug'         => $phpMeta['plugin_slug'],
+            'plugin_name'         => $phpMeta['plugin_name'] ?? $readmeMeta['plugin_name'],
+            'plugin_version'      => $phpMeta['plugin_version'],
+            'plugin_author'       => $phpMeta['plugin_author'],
+            'plugin_requires'     => $readmeMeta['requires_at_least'],
+            'plugin_tested'       => $readmeMeta['tested_up_to'],
             'plugin_requires_php' => $phpMeta['requires_php'] ?? $readmeMeta['requires_php'],
-            'plugin_description' => $phpMeta['description'] ?? $readmeMeta['short_description'],
-            'stable_tag'         => $readmeMeta['stable_tag'],
+            'plugin_description'  => $phpMeta['description'] ?? $readmeMeta['short_description'],
+            'stable_tag'          => $readmeMeta['stable_tag'],
         ];
     }
 
@@ -88,6 +94,8 @@ class ZipExtractor
 
     /**
      * Asserts that $path is a ZIP archive by inspecting its magic bytes.
+     *
+     * @param string $path Absolute path to the file to inspect.
      *
      * @throws RuntimeException If the MIME type is not application/zip.
      */
@@ -105,6 +113,8 @@ class ZipExtractor
 
     /**
      * Asserts that $path is a plain-text file by inspecting its magic bytes.
+     *
+     * @param string $path Absolute path to the file to inspect.
      *
      * @throws RuntimeException If the MIME type is not text/plain.
      */
@@ -130,6 +140,9 @@ class ZipExtractor
      * All entries are scanned before extraction. Any entry that would cause a
      * path traversal, exceeds the per-entry compression ratio, or pushes the
      * total uncompressed size over the limit causes an immediate abort.
+     *
+     * @param string $zipPath Absolute path to the ZIP file.
+     * @param string $destDir Absolute path to the extraction destination directory.
      *
      * @throws RuntimeException On any security violation or extraction error.
      */
@@ -208,6 +221,10 @@ class ZipExtractor
     /**
      * Searches for readme.txt (case-insensitive) up to one level deep inside
      * the extraction directory.
+     *
+     * @param  string $extractDir Absolute path to the extraction root.
+     *
+     * @return string|null Absolute path to readme.txt, or null if not found.
      */
     private function findReadme(string $extractDir): ?string
     {
@@ -224,6 +241,8 @@ class ZipExtractor
     /**
      * Reads and parses the standard WordPress readme.txt headers and short
      * description from $path.
+     *
+     * @param  string $path Absolute path to readme.txt.
      *
      * @return array{
      *     plugin_name: string|null,
@@ -250,6 +269,11 @@ class ZipExtractor
 
     /**
      * Extracts the value of a "Key: value" header line from readme.txt content.
+     *
+     * @param  string $content Full (or truncated) text content of readme.txt.
+     * @param  string $key     Header key to search for (e.g. "Stable tag").
+     *
+     * @return string|null Trimmed header value, or null if the key is absent.
      */
     private function parseReadmeHeader(string $content, string $key): ?string
     {
@@ -262,6 +286,10 @@ class ZipExtractor
 
     /**
      * Extracts the plugin name from the "=== Plugin Name ===" title heading.
+     *
+     * @param  string $content Full (or truncated) text content of readme.txt.
+     *
+     * @return string|null Plugin name, or null if no title heading is found.
      */
     private function parseFirstHeading(string $content): ?string
     {
@@ -278,6 +306,10 @@ class ZipExtractor
      * The short description is the first non-empty paragraph that appears
      * after the header key-value block and before the first == Section ==
      * heading.
+     *
+     * @param  string $content Full (or truncated) text content of readme.txt.
+     *
+     * @return string|null Short description paragraph, or null if not found.
      */
     private function parseShortDescription(string $content): ?string
     {
@@ -313,6 +345,8 @@ class ZipExtractor
      * The main plugin file is the PHP file (up to one level deep) that contains
      * a "Plugin Name:" header. The plugin slug is derived from the name of the
      * directory that directly contains that file (if it differs from $extractDir).
+     *
+     * @param  string $extractDir Absolute path to the extraction root.
      *
      * @return array{
      *     plugin_slug: string|null,
@@ -359,6 +393,10 @@ class ZipExtractor
 
     /**
      * Scans PHP files up to one level deep for the one containing "Plugin Name:".
+     *
+     * @param  string $extractDir Absolute path to the extraction root.
+     *
+     * @return string|null Absolute path to the main plugin PHP file, or null.
      */
     private function findMainPluginFile(string $extractDir): ?string
     {
@@ -380,6 +418,11 @@ class ZipExtractor
     /**
      * Extracts the value of a standard WordPress plugin file header field
      * (e.g. "Plugin Name: Foo", "Version: 1.0.0").
+     *
+     * @param  string $content File content (typically the first 8 KB of a PHP file).
+     * @param  string $field   Header field name to search for (e.g. "Plugin Name").
+     *
+     * @return string|null Trimmed field value, or null if absent.
      */
     private function parsePhpHeader(string $content, string $field): ?string
     {
@@ -396,6 +439,11 @@ class ZipExtractor
 
     /**
      * Reads up to $maxBytes bytes from a file.
+     *
+     * @param  string $path     Absolute path to the file.
+     * @param  int    $maxBytes Maximum number of bytes to read.
+     *
+     * @return string File contents (possibly truncated to $maxBytes).
      *
      * @throws RuntimeException If the file cannot be read.
      */

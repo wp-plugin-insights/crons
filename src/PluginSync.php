@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use mysqli;
+
 /**
  * Synchronizes plugin data from the WordPress.org API into the local database.
  *
@@ -13,6 +17,9 @@ declare(strict_types=1);
  */
 class PluginSync
 {
+    /**
+     * @param mysqli $db Active database connection.
+     */
     public function __construct(private readonly mysqli $db)
     {
     }
@@ -20,14 +27,16 @@ class PluginSync
     /**
      * Inserts or updates a single plugin record with all available API metadata.
      *
-     * @param array<string, mixed> $plugin Raw plugin array from the WordPress API.
+     * Returns 'unchanged' with plugin_id 0 if the slug is missing from $plugin.
+     *
+     * @param  array<string, mixed> $plugin Raw plugin array from the WordPress API.
      *
      * @return array{result: 'inserted'|'updated'|'unchanged', plugin_id: int}
      */
     public function upsert(array $plugin): array
     {
-        $slug                 = (string) ($plugin['slug']                     ?? '');
-        $version              = (string) ($plugin['version']                  ?? '');
+        $slug                 = trim((string) ($plugin['slug']                     ?? ''));
+        $version              = trim((string) ($plugin['version']                  ?? ''));
         $installs             = (int)    ($plugin['active_installs']          ?? 0);
         $zip                  = (string) ($plugin['download_link']            ?? '');
         $name                 = (string) ($plugin['name']                     ?? '');
@@ -145,8 +154,8 @@ class PluginSync
                 continue;
             }
 
-            $ver  = (string) $ver;
-            $zip  = (string) $zip;
+            $ver  = trim((string) $ver);
+            $zip  = trim((string) $zip);
 
             $stmt = $this->db->prepare(
                 'INSERT IGNORE INTO plugin_version (plugin_id, plugin_version, plugin_version_zip)
@@ -161,6 +170,10 @@ class PluginSync
     /**
      * Converts the WordPress API last_updated string (e.g. "2026-03-20 2:51pm GMT")
      * into a MySQL-compatible datetime string, or returns null on failure.
+     *
+     * @param  string $value Raw date string from the WordPress.org API.
+     *
+     * @return string|null MySQL datetime string ("Y-m-d H:i:s"), or null if unparseable.
      */
     private function parseDateTime(string $value): ?string
     {

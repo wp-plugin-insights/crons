@@ -18,9 +18,15 @@ require_once __DIR__ . '/../dbcon.php';
 require_once __DIR__ . '/src/Migrations.php';
 require_once __DIR__ . '/src/WpPluginFetcher.php';
 require_once __DIR__ . '/src/PluginSync.php';
+require_once __DIR__ . '/src/CronLogger.php';
+
+use PluginInsight\CronLogger;
+use PluginInsight\Migrations;
+use PluginInsight\PluginSync;
+use PluginInsight\WpPluginFetcher;
 
 /** Current schema version. Increment when migrations are added. */
-const DB_VERSION = '1.8.0';
+const DB_VERSION = '2.1.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;
@@ -29,6 +35,7 @@ const PER_PAGE = 200;
 // Bootstrap
 // ---------------------------------------------------------------------------
 
+$db = db_connect();
 $migrations = new Migrations($db);
 $migrations->run(DB_VERSION);
 
@@ -48,6 +55,8 @@ $fetcher = new WpPluginFetcher('updated', [
     'donate_link'     => 0,
 ]);
 $syncer = new PluginSync($db);
+$logger = new CronLogger($db, 'fetch-new-plugins');
+$runId  = $logger->start();
 
 // ---------------------------------------------------------------------------
 // Fetch page 1 and sync
@@ -59,28 +68,31 @@ $unchanged = 0;
 
 try {
     $data = $fetcher->fetchPage(1, PER_PAGE);
-} catch (RuntimeException $e) {
+
+    foreach ($data['plugins'] as $plugin) {
+        $upsert = $syncer->upsert($plugin);
+
+        match ($upsert['result']) {
+            'inserted'  => ++$inserted,
+            'updated'   => ++$updated,
+            default     => ++$unchanged,
+        };
+
+        if ($upsert['plugin_id'] > 0 && !empty($plugin['versions'])) {
+            $syncer->syncVersions($upsert['plugin_id'], $plugin['versions']);
+        }
+    }
+
+    printf(
+        "Done. Inserted: %d | Updated: %d | Unchanged: %d\n",
+        $inserted,
+        $updated,
+        $unchanged
+    );
+
+    $logger->finish($runId, $inserted + $updated + $unchanged);
+} catch (Throwable $e) {
+    $logger->fail($runId, $e->getMessage());
     fprintf(STDERR, "[ERROR] %s\n", $e->getMessage());
     exit(1);
 }
-
-foreach ($data['plugins'] as $plugin) {
-    $upsert = $syncer->upsert($plugin);
-
-    match ($upsert['result']) {
-        'inserted'  => ++$inserted,
-        'updated'   => ++$updated,
-        default     => ++$unchanged,
-    };
-
-    if ($upsert['plugin_id'] > 0 && !empty($plugin['versions'])) {
-        $syncer->syncVersions($upsert['plugin_id'], $plugin['versions']);
-    }
-}
-
-printf(
-    "Done. Inserted: %d | Updated: %d | Unchanged: %d\n",
-    $inserted,
-    $updated,
-    $unchanged
-);

@@ -2,6 +2,13 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use FilesystemIterator;
+use mysqli;
+use RecursiveDirectoryIterator;
+use RecursiveIteratorIterator;
+
 /**
  * Removes extracted plugin directories that are older than a given number of hours.
  *
@@ -11,12 +18,21 @@ declare(strict_types=1);
  */
 class PluginCleaner
 {
+    /**
+     * @param mysqli $db Active database connection.
+     */
     public function __construct(private readonly mysqli $db)
     {
     }
 
     /**
      * Returns plugin versions whose extracted directory is older than $hours hours.
+     *
+     * Only rows with a non-null plugin_version_path are returned, since those
+     * are the only ones backed by a directory on disk.
+     *
+     * @param  int $hours Maximum age in hours before a directory is considered expired.
+     * @param  int $limit Maximum number of rows to return per batch.
      *
      * @return list<array{plugin_id: int, plugin_version: string, plugin_version_path: string}>
      */
@@ -43,7 +59,10 @@ class PluginCleaner
     }
 
     /**
-     * Deletes the extracted directory and clears plugin_version_path in the database.
+     * Deletes the extracted directory for the given row and clears its path in the database.
+     *
+     * If the directory does not exist on disk (already deleted by another process),
+     * the database update is still performed so the row is not retried.
      *
      * @param array{plugin_id: int, plugin_version: string, plugin_version_path: string} $row
      */
@@ -67,6 +86,12 @@ class PluginCleaner
 
     /**
      * Recursively deletes a directory and all its contents.
+     *
+     * Files and subdirectories are removed depth-first (children before parents).
+     * Individual removal failures are silently ignored — partial cleanup is
+     * preferable to an aborted run.
+     *
+     * @param string $path Absolute path to the directory to delete.
      */
     private function deleteDirectory(string $path): void
     {

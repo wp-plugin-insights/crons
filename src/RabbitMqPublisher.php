@@ -2,6 +2,15 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use AMQPChannel;
+use AMQPChannelException;
+use AMQPConnection;
+use AMQPConnectionException;
+use AMQPExchange;
+use AMQPExchangeException;
+
 /**
  * Publishes plugin validation events to a RabbitMQ exchange.
  *
@@ -21,9 +30,15 @@ declare(strict_types=1);
  */
 class RabbitMqPublisher
 {
+    /** Declared exchange used for all publish calls. */
     private AMQPExchange $exchange;
 
     /**
+     * @param string $host         Broker hostname or IP address.
+     * @param int    $port         Broker AMQP port (default 5672).
+     * @param string $login        AMQP username.
+     * @param string $password     AMQP password.
+     * @param string $vhost        Virtual host (default "/").
      * @param string $exchangeName Name of the fanout exchange to publish to.
      *
      * @throws AMQPConnectionException If the broker is unreachable.
@@ -32,12 +47,11 @@ class RabbitMqPublisher
      */
     public function __construct(
         string $host,
-        int    $port,
+        int $port,
         string $login,
         string $password,
         string $vhost,
-        string $exchangeName,
-        string $queueName
+        string $exchangeName
     ) {
         $conn = new AMQPConnection();
         $conn->setHost($host);
@@ -61,7 +75,10 @@ class RabbitMqPublisher
     /**
      * Publishes a validation event as a persistent JSON message.
      *
-     * @param array<string, mixed> $message
+     * The message body is JSON-encoded from $message. The routing key is
+     * empty because the exchange is a fanout (routing keys are ignored).
+     *
+     * @param array<string, mixed> $message Associative array to publish as JSON.
      *
      * @throws AMQPExchangeException On publish failure.
      */

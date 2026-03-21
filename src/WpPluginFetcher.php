@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+namespace PluginInsight;
+
+use RuntimeException;
+
 /**
  * Fetches plugin data from the WordPress.org Plugins API.
  *
@@ -13,8 +17,13 @@ declare(strict_types=1);
  */
 class WpPluginFetcher
 {
-    private const API_URL   = 'https://api.wordpress.org/plugins/info/1.2/';
-    private const TIMEOUT   = 30;
+    /** WordPress.org Plugins API endpoint. */
+    private const API_URL = 'https://api.wordpress.org/plugins/info/1.2/';
+
+    /** Maximum number of seconds to wait for the HTTP response. */
+    private const TIMEOUT = 30;
+
+    /** User-Agent header sent with every HTTP request. */
     private const USER_AGENT = 'PluginInsight/1.0 (+https://plugininsight.com)';
 
     /**
@@ -23,7 +32,7 @@ class WpPluginFetcher
      */
     public function __construct(
         private readonly string $browse,
-        private readonly array  $fields
+        private readonly array $fields
     ) {
     }
 
@@ -38,7 +47,7 @@ class WpPluginFetcher
      *     plugins: list<array<string, mixed>>
      * }
      *
-     * @throws RuntimeException On HTTP or JSON parsing failure.
+     * @throws RuntimeException On cURL error, JSON parse failure, or unexpected response shape.
      */
     public function fetchPage(int $page, int $perPage = 200): array
     {
@@ -53,6 +62,10 @@ class WpPluginFetcher
         ]);
 
         $ch = curl_init($url);
+        if ($ch === false) {
+            throw new RuntimeException("curl_init failed for URL: {$url}");
+        }
+
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => self::TIMEOUT,
