@@ -26,7 +26,7 @@ require_once __DIR__ . '/src/WpPluginFetcher.php';
 require_once __DIR__ . '/src/PluginSync.php';
 
 /** Must match or exceed the version declared in fetch-new-plugins.php. */
-const DB_VERSION = '1.5.0';
+const DB_VERSION = '1.8.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;

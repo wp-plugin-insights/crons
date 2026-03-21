@@ -22,11 +22,13 @@ declare(strict_types=1);
 require_once __DIR__ . '/../dbcon.php';
 require_once __DIR__ . '/rabbitmq.php';
 require_once __DIR__ . '/src/Migrations.php';
+require_once __DIR__ . '/src/ZipExtractor.php';
 require_once __DIR__ . '/src/PluginValidator.php';
 require_once __DIR__ . '/src/RabbitMqPublisher.php';
+require_once __DIR__ . '/src/UploadRepository.php';
 
 /** Current schema version. */
-const DB_VERSION = '1.5.0';
+const DB_VERSION = '1.8.0';
 
 /** Number of plugin versions processed per run. */
 const BATCH_SIZE = 10;
@@ -85,3 +87,32 @@ foreach ($pending as $row) {
 }
 
 printf("\nDone. OK: %d | Failed: %d\n", $ok, $failed);
+
+// ---------------------------------------------------------------------------
+// Retry pending API uploads (RabbitMQ publish may have failed at upload time)
+// ---------------------------------------------------------------------------
+
+$uploadRepo    = new UploadRepository($db);
+$pendingUploads = $uploadRepo->getPendingBatch(BATCH_SIZE);
+
+if (!empty($pendingUploads)) {
+    printf("\nRetrying %d pending upload(s)...\n\n", count($pendingUploads));
+
+    foreach ($pendingUploads as $upload) {
+        $label = $upload['upload_uuid'];
+
+        try {
+            $publisher->publish([
+                'plugin'  => $upload['plugin_slug'] ?? $upload['upload_uuid'],
+                'source'  => 'api-upload',
+                'version' => $upload['plugin_version'] ?? 'unknown',
+                'src'     => $upload['upload_path'],
+                'uuid'    => $upload['upload_uuid'],
+            ]);
+            $uploadRepo->updateStatus($upload['upload_uuid'], 'queued');
+            printf("[OK]    %s\n", $label);
+        } catch (RuntimeException $e) {
+            fprintf(STDERR, "[ERROR] %s: %s\n", $label, $e->getMessage());
+        }
+    }
+}

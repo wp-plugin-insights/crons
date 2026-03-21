@@ -23,7 +23,7 @@ require_once __DIR__ . '/src/Migrations.php';
 require_once __DIR__ . '/src/PluginCleaner.php';
 
 /** Current schema version. */
-const DB_VERSION = '1.5.0';
+const DB_VERSION = '1.8.0';
 
 /** Directories older than this many hours will be deleted. */
 const EXPIRE_HOURS = 6;

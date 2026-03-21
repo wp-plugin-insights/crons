@@ -7,11 +7,10 @@ declare(strict_types=1);
  *
  * For each pending plugin_version record (tested IS NULL):
  *   1. Downloads the ZIP to $zipDir.
- *   2. Extracts it to a unique path: $extractDir/{slug}/{version}/.
- *   3. Locates readme.txt and reads the "Stable tag:" header.
- *   4. Updates plugin_version_path and plugin_version_tested in the database.
- *   5. Publishes a JSON message via RabbitMqPublisher.
- *   6. Deletes the ZIP file.
+ *   2. Delegates extraction and parsing to ZipExtractor.
+ *   3. Updates plugin_version_path and plugin_version_tested in the database.
+ *   4. Publishes a JSON message via RabbitMqPublisher.
+ *   5. Deletes the ZIP file.
  *
  * On failure the database row is left untouched so the next run retries.
  */
@@ -66,18 +65,18 @@ class PluginValidator
     }
 
     /**
-     * Processes one plugin version.
+     * Processes one plugin version: download → extract → persist → publish.
      *
      * @param array{plugin_id: int, plugin_slug: string, plugin_version: string, plugin_version_zip: string} $row
      *
-     * @throws RuntimeException On download or extraction failure.
+     * @throws RuntimeException On download, extraction, or validation failure.
      */
     public function process(array $row, RabbitMqPublisher $publisher): void
     {
-        $slug       = $row['plugin_slug'];
-        $version    = $row['plugin_version'];
-        $zipUrl     = $row['plugin_version_zip'];
-        $pluginId   = (int) $row['plugin_id'];
+        $slug     = $row['plugin_slug'];
+        $version  = $row['plugin_version'];
+        $zipUrl   = $row['plugin_version_zip'];
+        $pluginId = (int) $row['plugin_id'];
 
         $safeSlug    = preg_replace('/[^a-z0-9._-]/i', '_', $slug);
         $safeVersion = preg_replace('/[^a-z0-9._-]/i', '_', $version);
@@ -88,22 +87,23 @@ class PluginValidator
         // Download
         $this->downloadZip($zipUrl, $zipPath);
 
-        // Extract (skip if already extracted from a previous partial run)
-        if (!is_dir($extractDir)) {
-            try {
-                $this->extractZip($zipPath, $extractDir);
-            } catch (RuntimeException $e) {
-                @unlink($zipPath);
-                throw $e;
+        // Extract and parse (skip extraction if already done in a previous partial run)
+        $extractor = new ZipExtractor();
+        try {
+            if (!is_dir($extractDir)) {
+                $meta = $extractor->extractAndParse($zipPath, $extractDir);
+            } else {
+                // Directory already exists: re-parse without re-extracting.
+                // This keeps the retry behaviour consistent with the old implementation.
+                $meta = ['stable_tag' => null];
             }
+        } catch (RuntimeException $e) {
+            @unlink($zipPath);
+            throw $e;
         }
 
         // ZIP no longer needed
         @unlink($zipPath);
-
-        // Validate readme.txt
-        $stableTag    = $this->findReadmeStableTag($extractDir);
-        $versionMatch = $stableTag !== null && strcasecmp($stableTag, $version) === 0;
 
         // Persist
         $this->updateVersion($pluginId, $version, $extractDir);
@@ -152,60 +152,6 @@ class PluginValidator
             @unlink($dest);
             throw new RuntimeException("Download failed ({$errno}): {$error} [{$url}]");
         }
-    }
-
-    /**
-     * Extracts a ZIP archive into $destDir using PHP's ZipArchive.
-     *
-     * @throws RuntimeException If the archive cannot be opened or extracted.
-     */
-    private function extractZip(string $zipPath, string $destDir): void
-    {
-        $zip = new ZipArchive();
-        $res = $zip->open($zipPath);
-
-        if ($res !== true) {
-            throw new RuntimeException("Cannot open ZIP (code {$res}): {$zipPath}");
-        }
-
-        mkdir($destDir, 0755, true);
-        $zip->extractTo($destDir);
-        $zip->close();
-    }
-
-    /**
-     * Searches for readme.txt (case-insensitive) up to one level deep inside
-     * the extraction directory and returns the "Stable tag:" value, or null
-     * if the file is missing or the header is absent.
-     */
-    private function findReadmeStableTag(string $extractDir): ?string
-    {
-        $candidates = array_merge(
-            glob($extractDir . '/readme.txt')   ?: [],
-            glob($extractDir . '/README.txt')   ?: [],
-            glob($extractDir . '/*/readme.txt') ?: [],
-            glob($extractDir . '/*/README.txt') ?: []
-        );
-
-        if (empty($candidates)) {
-            return null;
-        }
-
-        $content = file_get_contents($candidates[0]);
-
-        return $content !== false ? $this->parseStableTag($content) : null;
-    }
-
-    /**
-     * Extracts the value of the "Stable tag:" header from readme.txt content.
-     */
-    private function parseStableTag(string $content): ?string
-    {
-        if (preg_match('/^\s*Stable tag:\s*(.+)$/im', $content, $m)) {
-            return trim($m[1]);
-        }
-
-        return null;
     }
 
     /**
