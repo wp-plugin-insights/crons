@@ -44,6 +44,10 @@ class Migrations
             $this->migrate140();
         }
 
+        if (version_compare($stored, '1.5.0', '<')) {
+            $this->migrate150();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -97,6 +101,18 @@ class Migrations
     // -------------------------------------------------------------------------
     // Migration routines (one method per version, never modified)
     // -------------------------------------------------------------------------
+
+    /**
+     * 1.5.0 — Add plugin_version_path to store the extracted plugin directory.
+     */
+    private function migrate150(): void
+    {
+        $this->db->query(
+            "ALTER TABLE `plugin_version`
+             ADD COLUMN IF NOT EXISTS `plugin_version_path` varchar(500)
+                 CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL"
+        );
+    }
 
     /**
      * 1.4.0 — Add author/homepage/icons columns to plugin; create plugin_version table.
