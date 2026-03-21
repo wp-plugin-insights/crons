@@ -9,4 +9,5 @@ const RABBITMQ_PORT  = 5672;
 const RABBITMQ_USER  = 'your_user';
 const RABBITMQ_PASS  = 'your_password';
 const RABBITMQ_VHOST = '/';
-const RABBITMQ_QUEUE = 'plugin-validation';
+const RABBITMQ_EXCHANGE = 'plugin.analysis.all';
+const RABBITMQ_QUEUE    = 'plugin-validation';

@@ -110,13 +110,10 @@ class PluginValidator
 
         // Publish
         $publisher->publish([
-            'plugin_id'         => $pluginId,
-            'plugin_slug'       => $slug,
-            'plugin_version'    => $version,
-            'plugin_path'       => $extractDir,
-            'readme_stable_tag' => $stableTag,
-            'version_match'     => $versionMatch,
-            'queued_at'         => date('c'),
+            'name'    => $slug,
+            'source'  => 'wordpress.org',
+            'version' => $version,
+            'src'     => $extractDir,
         ]);
     }
 

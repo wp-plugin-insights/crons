@@ -3,26 +3,32 @@
 declare(strict_types=1);
 
 /**
- * Publishes plugin validation events to a RabbitMQ queue.
+ * Publishes plugin validation events to a RabbitMQ exchange.
  *
  * Uses the php-amqp extension (ext-amqp). Install on Ubuntu/Debian:
  *   apt-get install php8.4-amqp
  *
+ * Messages are published to a named fanout exchange. The exchange broadcasts
+ * to all queues bound to it; the routing key is ignored by the broker.
+ * Queue bindings must be set up externally (e.g. via the RabbitMQ management
+ * console or infrastructure provisioning).
+ *
  * The connection is established eagerly in the constructor so the process
  * fails immediately if RabbitMQ is unreachable, before any work is done.
  *
- * The target queue is declared as durable so messages survive broker restarts.
- * Messages are published as persistent (delivery_mode = 2).
- * Routing uses the AMQP default exchange: the queue name is the routing key.
+ * Messages are published as persistent (delivery_mode = 2) so they survive
+ * broker restarts.
  */
 class RabbitMqPublisher
 {
     private AMQPExchange $exchange;
-    private string       $queueName;
 
     /**
+     * @param string $exchangeName Name of the fanout exchange to publish to.
+     *
      * @throws AMQPConnectionException If the broker is unreachable.
      * @throws AMQPChannelException    If the channel cannot be opened.
+     * @throws AMQPExchangeException   If the exchange cannot be declared.
      */
     public function __construct(
         string $host,
@@ -30,6 +36,7 @@ class RabbitMqPublisher
         string $login,
         string $password,
         string $vhost,
+        string $exchangeName,
         string $queueName
     ) {
         $conn = new AMQPConnection();
@@ -42,15 +49,13 @@ class RabbitMqPublisher
 
         $channel = new AMQPChannel($conn);
 
-        // Declare the queue as durable so it survives broker restarts.
-        $queue = new AMQPQueue($channel);
-        $queue->setName($queueName);
-        $queue->setFlags(AMQP_DURABLE);
-        $queue->declareQueue();
+        $exchange = new AMQPExchange($channel);
+        $exchange->setName($exchangeName);
+        $exchange->setType(AMQP_EX_TYPE_FANOUT);
+        $exchange->setFlags(AMQP_DURABLE);
+        $exchange->declareExchange();
 
-        // Default exchange routes messages directly by queue name.
-        $this->exchange  = new AMQPExchange($channel);
-        $this->queueName = $queueName;
+        $this->exchange = $exchange;
     }
 
     /**
@@ -64,7 +69,7 @@ class RabbitMqPublisher
     {
         $this->exchange->publish(
             json_encode($message, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-            $this->queueName,
+            '',
             AMQP_NOPARAM,
             ['delivery_mode' => AMQP_DELIVERY_MODE_PERSISTENT]
         );
