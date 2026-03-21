@@ -110,7 +110,7 @@ class PluginValidator
 
         // Publish
         $publisher->publish([
-            'name'    => $slug,
+            'plugin'  => $slug,
             'source'  => 'wordpress.org',
             'version' => $version,
             'src'     => $extractDir,
