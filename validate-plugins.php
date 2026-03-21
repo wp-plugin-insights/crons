@@ -8,7 +8,7 @@
  *   2. Extracts it to a unique directory under EXTRACT_DIR.
  *   3. Validates the readme.txt "Stable tag:" against the expected version.
  *   4. Updates plugin_version_path and plugin_version_tested in the database.
- *   5. Publishes a JSON message to the RabbitMQ queue (stub: written to QUEUE_LOG).
+ *   5. Publishes a persistent JSON message to the RabbitMQ queue.
  *
  * On failure a version is left untouched (plugin_version_tested remains NULL)
  * so the next run retries it.
@@ -20,6 +20,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/../dbcon.php';
+require_once __DIR__ . '/rabbitmq.php';
 require_once __DIR__ . '/src/Migrations.php';
 require_once __DIR__ . '/src/PluginValidator.php';
 require_once __DIR__ . '/src/RabbitMqPublisher.php';
@@ -36,9 +37,6 @@ const ZIP_DIR = '/webs/plugininsight/zipfiles';
 /** Directory where plugin files are extracted for analysis. */
 const EXTRACT_DIR = '/webs/plugininsight/extracted';
 
-/** Log file used by the RabbitMQ stub publisher. */
-const QUEUE_LOG = '/webs/plugininsight/logs/rabbitmq-queue.log';
-
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
@@ -47,7 +45,14 @@ $migrations = new Migrations($db);
 $migrations->run(DB_VERSION);
 
 $validator = new PluginValidator($db, ZIP_DIR, EXTRACT_DIR);
-$publisher = new RabbitMqPublisher(QUEUE_LOG);
+$publisher = new RabbitMqPublisher(
+    RABBITMQ_HOST,
+    RABBITMQ_PORT,
+    RABBITMQ_USER,
+    RABBITMQ_PASS,
+    RABBITMQ_VHOST,
+    RABBITMQ_QUEUE
+);
 
 // ---------------------------------------------------------------------------
 // Process batch

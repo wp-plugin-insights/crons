@@ -3,8 +3,9 @@ CLAUDE.md
 AGENTS-generic.md
 .claude/
 
-# Database credentials
+# Credentials / connection config
 dbcon.php
+rabbitmq.php
 
 # Logs
 *.log
