@@ -77,19 +77,23 @@ class UploadRepository
      */
     public function updateStatus(string $uuid, string $status, ?string $error = null): void
     {
+        $trackProcessed = in_array($status, ['done', 'error'], true);
+
         if ($error !== null) {
-            $stmt = $this->db->prepare(
-                'UPDATE plugin_upload
-                 SET upload_status = ?, upload_error = ?
-                 WHERE upload_uuid = ?'
-            );
+            $sql  = $trackProcessed
+                ? 'UPDATE plugin_upload
+                   SET upload_status = ?, upload_error = ?, processed_at = NOW()
+                   WHERE upload_uuid = ?'
+                : 'UPDATE plugin_upload
+                   SET upload_status = ?, upload_error = ?
+                   WHERE upload_uuid = ?';
+            $stmt = $this->db->prepare($sql);
             $stmt->bind_param('sss', $status, $error, $uuid);
         } else {
-            $stmt = $this->db->prepare(
-                'UPDATE plugin_upload
-                 SET upload_status = ?
-                 WHERE upload_uuid = ?'
-            );
+            $sql  = $trackProcessed
+                ? 'UPDATE plugin_upload SET upload_status = ?, processed_at = NOW() WHERE upload_uuid = ?'
+                : 'UPDATE plugin_upload SET upload_status = ? WHERE upload_uuid = ?';
+            $stmt = $this->db->prepare($sql);
             $stmt->bind_param('ss', $status, $uuid);
         }
 
@@ -173,6 +177,29 @@ class UploadRepository
         $stmt->close();
 
         return $count;
+    }
+
+    /**
+     * Resets an upload back to 'pending' so the validate-plugins cron will
+     * re-publish it to RabbitMQ on the next run.
+     *
+     * Only acts when the current status is 'queued' or 'error' and the
+     * upload_path is still present (directory exists on disk).
+     *
+     * @param string $uuid UUID of the upload to requeue.
+     */
+    public function requeueByUuid(string $uuid): void
+    {
+        $stmt = $this->db->prepare(
+            "UPDATE plugin_upload
+             SET upload_status = 'pending', upload_error = NULL
+             WHERE upload_uuid = ?
+               AND upload_status IN ('queued', 'error')
+               AND upload_path IS NOT NULL"
+        );
+        $stmt->bind_param('s', $uuid);
+        $stmt->execute();
+        $stmt->close();
     }
 
     /**

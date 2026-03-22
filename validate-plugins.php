@@ -39,7 +39,7 @@ use PluginInsight\RabbitMqPublisher;
 use PluginInsight\UploadRepository;
 
 /** Current schema version. */
-const DB_VERSION = '2.1.0';
+const DB_VERSION = '2.2.0';
 
 /** Number of plugin versions processed per run. */
 const BATCH_SIZE = 10;
@@ -139,6 +139,7 @@ try {
                     $uploadRepo->updateStatus($upload['upload_uuid'], 'queued');
                     printf("[OK]    %s\n", $label);
                 } catch (Throwable $e) {
+                    $uploadRepo->updateStatus($upload['upload_uuid'], 'error', $e->getMessage());
                     fprintf(STDERR, "[ERROR] %s: %s\n", $label, $e->getMessage());
                 }
             }

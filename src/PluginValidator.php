@@ -137,28 +137,31 @@ class PluginValidator
         // ZIP no longer needed
         @unlink($zipPath);
 
-        // Persist
+        // Publish (optional — skip if no publisher is configured)
+        if ($publisher !== null) {
+            try {
+                $publisher->publish([
+                    'plugin'  => $slug,
+                    'source'  => 'wordpress.org',
+                    'version' => $version,
+                    'src'     => $extractDir,
+                ]);
+            } catch (Throwable $e) {
+                // Do NOT mark as tested — the extraction directory already exists so
+                // re-extraction will be skipped on the next run, but publishing will
+                // be retried until it succeeds.
+                throw new RuntimeException(
+                    'RabbitMQ publish failed: ' . $e->getMessage(),
+                    0,
+                    $e
+                );
+            }
+        }
+
+        // Persist — reached only after a successful publish (or when no publisher
+        // is configured, in which case the version is marked as processed without
+        // a queued message; RabbitMQ was unavailable for this entire cron run).
         $this->updateVersion($pluginId, $version, $extractDir);
-
-        // Publish (optional — skip silently if no publisher is available)
-        if ($publisher === null) {
-            return;
-        }
-
-        try {
-            $publisher->publish([
-                'plugin'  => $slug,
-                'source'  => 'wordpress.org',
-                'version' => $version,
-                'src'     => $extractDir,
-            ]);
-        } catch (Throwable $e) {
-            throw new RuntimeException(
-                'RabbitMQ publish failed: ' . $e->getMessage(),
-                0,
-                $e
-            );
-        }
     }
 
     // -------------------------------------------------------------------------

@@ -85,6 +85,62 @@ class PluginCleaner
     }
 
     /**
+     * Returns up to $limit API upload records whose extracted directory is older
+     * than $hours hours and whose processing is complete (status done or error).
+     *
+     * Only rows with a non-null upload_path are returned.
+     *
+     * @param  int $hours Maximum age in hours before a directory is considered expired.
+     * @param  int $limit Maximum number of rows to return per batch.
+     *
+     * @return list<array{upload_uuid: string, upload_path: string}>
+     */
+    public function getExpiredUploads(int $hours, int $limit): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT upload_uuid, upload_path
+             FROM plugin_upload
+             WHERE upload_path IS NOT NULL
+               AND upload_status IN ('done', 'error')
+               AND uploaded_at < NOW() - INTERVAL ? HOUR
+             LIMIT ?"
+        );
+        $stmt->bind_param('ii', $hours, $limit);
+        $stmt->execute();
+
+        $result = $stmt->get_result();
+        $rows   = [];
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+
+        return $rows;
+    }
+
+    /**
+     * Deletes the extracted directory for the given upload row and clears its
+     * path in the database.
+     *
+     * @param array{upload_uuid: string, upload_path: string} $row
+     */
+    public function cleanupUpload(array $row): void
+    {
+        $path = $row['upload_path'];
+
+        if (is_dir($path)) {
+            $this->deleteDirectory($path);
+        }
+
+        $stmt = $this->db->prepare(
+            'UPDATE plugin_upload SET upload_path = NULL WHERE upload_uuid = ?'
+        );
+        $stmt->bind_param('s', $row['upload_uuid']);
+        $stmt->execute();
+        $stmt->close();
+    }
+
+    /**
      * Recursively deletes a directory and all its contents.
      *
      * Files and subdirectories are removed depth-first (children before parents).

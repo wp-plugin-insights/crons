@@ -90,6 +90,10 @@ class Migrations
             $this->migrate210();
         }
 
+        if (version_compare($stored, '2.2.0', '<')) {
+            $this->migrate220();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -491,6 +495,61 @@ class Migrations
                 PRIMARY KEY (`cron_run_id`),
                 KEY `idx_cron_name_started` (`cron_name`, `started_at`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
+        );
+    }
+
+    /**
+     * 2.2.0 — Allow pluginresult rows for API-uploaded plugins.
+     *
+     * API-uploaded plugins (plugin_upload) are not registered in the plugin table,
+     * so plugin_id cannot be populated when runners produce results for them.
+     *
+     * Changes:
+     *  - plugin_id becomes nullable (was NOT NULL).
+     *  - upload_uuid CHAR(36) nullable column added, with FK to plugin_upload.
+     *  - CHECK constraint ensures exactly one of plugin_id / upload_uuid is set.
+     *
+     * The foreign-key constraint on plugin_id is recreated as DEFERRABLE-style
+     * nullable: rows with plugin_id NOT NULL still require a matching plugin row.
+     */
+    private function migrate220(): void
+    {
+        // Drop the NOT NULL constraint on plugin_id (MariaDB requires a full MODIFY).
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             MODIFY `plugin_id` bigint(20) unsigned DEFAULT NULL"
+        );
+
+        // Add upload_uuid column if it does not already exist.
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             ADD COLUMN IF NOT EXISTS `upload_uuid` char(36)
+                 CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL
+                 AFTER `plugin_id`"
+        );
+
+        // Add FK from upload_uuid to plugin_upload.
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             ADD CONSTRAINT `pluginresult_ibfk_3`
+             FOREIGN KEY (`upload_uuid`) REFERENCES `plugin_upload` (`upload_uuid`)"
+        );
+
+        // Add index on upload_uuid for result lookups by UUID.
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             ADD INDEX IF NOT EXISTS `upload_uuid` (`upload_uuid`)"
+        );
+
+        // Enforce that exactly one source identifier is present.
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             ADD CONSTRAINT `chk_pluginresult_source`
+             CHECK (
+                 (`plugin_id` IS NOT NULL AND `upload_uuid` IS NULL)
+                 OR
+                 (`plugin_id` IS NULL AND `upload_uuid` IS NOT NULL)
+             )"
         );
     }
 

@@ -28,7 +28,7 @@ use PluginInsight\Migrations;
 use PluginInsight\WpVersionFetcher;
 
 /** Current schema version. Must match the other cron entry-points. */
-const DB_VERSION = '2.1.0';
+const DB_VERSION = '2.2.0';
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 

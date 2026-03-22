@@ -32,7 +32,7 @@ use PluginInsight\PluginSync;
 use PluginInsight\WpPluginFetcher;
 
 /** Must match or exceed the version declared in fetch-new-plugins.php. */
-const DB_VERSION = '2.1.0';
+const DB_VERSION = '2.2.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;

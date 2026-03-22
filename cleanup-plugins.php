@@ -28,7 +28,7 @@ use PluginInsight\Migrations;
 use PluginInsight\PluginCleaner;
 
 /** Current schema version. */
-const DB_VERSION = '2.1.0';
+const DB_VERSION = '2.2.0';
 
 /** Directories older than this many hours will be deleted. */
 const EXPIRE_HOURS = 6;
@@ -74,6 +74,28 @@ try {
         } catch (Throwable $e) {
             fprintf(STDERR, "[ERROR] %s: %s\n", $row['plugin_version_path'], $e->getMessage());
             $failed++;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Clean up extracted directories from completed API uploads
+    // -------------------------------------------------------------------------
+
+    $expiredUploads = $cleaner->getExpiredUploads(EXPIRE_HOURS, CLEANUP_BATCH);
+
+    if (!empty($expiredUploads)) {
+        $uploadCount = count($expiredUploads);
+        printf("\nRemoving %d expired upload director%s...\n", $uploadCount, $uploadCount === 1 ? 'y' : 'ies');
+
+        foreach ($expiredUploads as $upload) {
+            try {
+                $cleaner->cleanupUpload($upload);
+                printf("[OK]    %s\n", $upload['upload_path']);
+                $ok++;
+            } catch (Throwable $e) {
+                fprintf(STDERR, "[ERROR] %s: %s\n", $upload['upload_path'], $e->getMessage());
+                $failed++;
+            }
         }
     }
 
