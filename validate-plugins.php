@@ -39,7 +39,7 @@ use PluginInsight\RabbitMqPublisher;
 use PluginInsight\UploadRepository;
 
 /** Current schema version. */
-const DB_VERSION = '2.2.0';
+const DB_VERSION = '2.3.0';
 
 /** Number of plugin versions processed per run. */
 const BATCH_SIZE = 10;
@@ -130,11 +130,10 @@ try {
 
                 try {
                     $publisher->publish([
-                        'plugin'  => $upload['plugin_slug'] ?? $upload['upload_uuid'],
-                        'source'  => 'api-upload',
-                        'version' => $upload['plugin_version'] ?? 'unknown',
+                        'plugin'  => $upload['plugin_slug'],
+                        'source'  => 'api',
+                        'version' => $upload['plugin_version'],
                         'src'     => $upload['upload_path'],
-                        'uuid'    => $upload['upload_uuid'],
                     ]);
                     $uploadRepo->updateStatus($upload['upload_uuid'], 'queued');
                     printf("[OK]    %s\n", $label);

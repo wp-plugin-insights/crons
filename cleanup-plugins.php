@@ -28,7 +28,7 @@ use PluginInsight\Migrations;
 use PluginInsight\PluginCleaner;
 
 /** Current schema version. */
-const DB_VERSION = '2.2.0';
+const DB_VERSION = '2.3.0';
 
 /** Directories older than this many hours will be deleted. */
 const EXPIRE_HOURS = 6;

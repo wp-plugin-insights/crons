@@ -27,16 +27,19 @@ PHP CLI scripts that fetch, synchronise, and enrich WordPress plugin data.
 
 ## Database schema
 
-Current version: **`DB_VERSION = 1.9.0`** (stored in `plugin_schema_meta`).
+Current version: **`DB_VERSION = 2.3.0`** (stored in `plugin_schema_meta`).
 
 Migrations run automatically on every script startup and are always idempotent.
 
-### `plugin` — one row per plugin slug
+### `plugin` — one row per (source, slug)
+
+Composite UNIQUE key: `(plugin_source, plugin_slug)`.
 
 | Column | Type | Source |
 |---|---|---|
 | `plugin_id` | bigint PK | auto |
-| `plugin_slug` | varchar(250) UNIQUE | `slug` |
+| `plugin_source` | varchar(250) NOT NULL | `wordpress.org` for WP.org plugins; `api` for uploaded plugins |
+| `plugin_slug` | varchar(250) | `slug` |
 | `plugin_version` | varchar(250) | `version` (latest) |
 | `plugin_installs` | int unsigned | `active_installs` |
 | `plugin_zip` | varchar(500) | `download_link` |
@@ -57,7 +60,8 @@ Migrations run automatically on every script startup and are always idempotent.
 | `plugin_last_updated` | datetime | `last_updated` |
 | `plugin_added` | date | `added` |
 | `plugin_icons` | text JSON | `icons` |
-| `plugin_source` | varchar(250) | hardcoded `wordpress.org` |
+
+> API-uploaded plugins (`plugin_source='api'`) are excluded from all public frontend queries.
 
 ### `plugin_version` — one row per (plugin, version)
 
@@ -73,11 +77,25 @@ Migrations run automatically on every script startup and are always idempotent.
 
 | Column | Type | Notes |
 |---|---|---|
-| `plugin_id` | bigint FK | references `plugin.plugin_id` |
+| `plugin_id` | bigint NOT NULL FK | references `plugin.plugin_id` |
 | `plugin_version` | varchar(250) | version string |
 | `runner_id` | int FK | references `runner.runner_id` |
 | `pluginresult_result` | longtext JSON | full runner output; must satisfy `JSON_VALID` |
 | `pluginresult_date` | datetime | when the result was stored |
+
+### `plugin_upload` — slim upload tracking for API uploads
+
+| Column | Type | Notes |
+|---|---|---|
+| `upload_uuid` | char(36) PK | UUID v4; primary external identifier |
+| `upload_ip` | varchar(45) | uploader IP address |
+| `plugin_id` | bigint NOT NULL FK | references `plugin.plugin_id` |
+| `plugin_version` | varchar(250) | version string at upload time |
+| `upload_path` | varchar(500) | absolute path to extracted plugin directory |
+| `upload_status` | enum | `pending` → `queued` → `done` / `error` |
+| `upload_error` | text | error message if status is `error` |
+| `uploaded_at` | datetime | |
+| `processed_at` | datetime | set when a runner finishes |
 
 ### `runner` — one row per RabbitMQ consumer worker
 
@@ -132,12 +150,17 @@ Each validated plugin version is published as a persistent JSON message:
 
 ```json
 {
-  "name": "inline-context",
+  "plugin": "inline-context",
   "source": "wordpress.org",
   "version": "2.7.3",
   "src": "/webs/plugininsight/extracted/inline-context/2.7.3"
 }
 ```
+
+- `plugin` — the plugin slug
+- `source` — `wordpress.org` for WP.org plugins; `api` for plugins uploaded via the API
+- `version` — the version string
+- `src` — absolute path to the extracted plugin directory
 
 ```bash
 # Check queue depths
@@ -340,7 +363,6 @@ const RABBITMQ_USER     = 'plugininsight';       // ← CHANGE THIS if different
 const RABBITMQ_PASS     = 'CHANGE_RABBITMQ_PASS'; // ← CHANGE THIS
 const RABBITMQ_VHOST    = '/';
 const RABBITMQ_EXCHANGE = 'plugin.analysis.all';
-const RABBITMQ_QUEUE    = 'plugin-validation';
 EOF
 chown plugininsight:plugininsight /webs/plugininsight/crons/rabbitmq.php
 chmod 640 /webs/plugininsight/crons/rabbitmq.php
@@ -395,7 +417,6 @@ Group=plugininsight
 WorkingDirectory=/webs/plugininsight/crons
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=1800
 EOF
 
 cat > /etc/systemd/system/plugininsight-fetch-all-plugins.timer << 'EOF'

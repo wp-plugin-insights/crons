@@ -26,7 +26,7 @@ use PluginInsight\Migrations;
 use PluginInsight\WpLocalesFetcher;
 
 /** Current schema version. Must match the other cron entry-points. */
-const DB_VERSION = '2.2.0';
+const DB_VERSION = '2.3.0';
 
 // ── Bootstrap ────────────────────────────────────────────────────────────────
 

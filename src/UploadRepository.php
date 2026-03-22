@@ -9,7 +9,12 @@ use mysqli;
 /**
  * Data-access layer for the plugin_upload table.
  *
- * Used by the upload API to insert and update upload records, and by the
+ * plugin_upload is a slim tracking table that links each API upload event
+ * (identified by a UUID) to a row in the plugin + plugin_version tables.
+ * Plugin metadata lives in plugin/plugin_version; only the UUID, IP address,
+ * status, path and timestamps are stored here.
+ *
+ * Used by the upload API to insert tracking records, and by the
  * validate-plugins cron to retry publishing pending uploads to RabbitMQ.
  */
 class UploadRepository
@@ -22,48 +27,27 @@ class UploadRepository
     }
 
     /**
-     * Inserts a new upload record with status 'pending'.
+     * Inserts a new upload tracking record with status 'pending'.
      *
-     * @param string $uuid        UUID v4 that uniquely identifies this upload.
-     * @param string $ip          IP address of the uploader.
-     * @param array{
-     *     plugin_slug: string|null,
-     *     plugin_name: string|null,
-     *     plugin_version: string|null,
-     *     plugin_author: string|null,
-     *     plugin_requires: string|null,
-     *     plugin_tested: string|null,
-     *     plugin_requires_php: string|null,
-     *     plugin_description: string|null,
-     * } $meta Parsed plugin metadata from ZipExtractor.
-     * @param string $extractPath Absolute path to the extracted plugin directory.
+     * @param string $uuid      UUID v4 that uniquely identifies this upload event.
+     * @param string $ip        IP address of the uploader.
+     * @param int    $pluginId  ID of the plugin row (source='api') in the plugin table.
+     * @param string $version   Plugin version string (e.g. "1.2.3").
+     * @param string $path      Absolute path to the extracted plugin directory.
      */
-    public function insert(string $uuid, string $ip, array $meta, string $extractPath): void
-    {
-        $status = 'pending';
-
+    public function insert(
+        string $uuid,
+        string $ip,
+        int $pluginId,
+        string $version,
+        string $path
+    ): void {
         $stmt = $this->db->prepare(
-            'INSERT INTO plugin_upload
-                (upload_uuid, upload_ip, plugin_slug, plugin_name, plugin_version,
-                 plugin_author, plugin_requires, plugin_tested, plugin_requires_php,
-                 plugin_description, upload_path, upload_status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            "INSERT INTO `plugin_upload`
+                 (upload_uuid, upload_ip, plugin_id, plugin_version, upload_path, upload_status)
+             VALUES (?, ?, ?, ?, ?, 'pending')"
         );
-        $stmt->bind_param(
-            'ssssssssssss',
-            $uuid,
-            $ip,
-            $meta['plugin_slug'],
-            $meta['plugin_name'],
-            $meta['plugin_version'],
-            $meta['plugin_author'],
-            $meta['plugin_requires'],
-            $meta['plugin_tested'],
-            $meta['plugin_requires_php'],
-            $meta['plugin_description'],
-            $extractPath,
-            $status
-        );
+        $stmt->bind_param('ssiss', $uuid, $ip, $pluginId, $version, $path);
         $stmt->execute();
         $stmt->close();
     }
@@ -80,19 +64,21 @@ class UploadRepository
         $trackProcessed = in_array($status, ['done', 'error'], true);
 
         if ($error !== null) {
-            $sql  = $trackProcessed
-                ? 'UPDATE plugin_upload
+            $sql = $trackProcessed
+                ? 'UPDATE `plugin_upload`
                    SET upload_status = ?, upload_error = ?, processed_at = NOW()
                    WHERE upload_uuid = ?'
-                : 'UPDATE plugin_upload
+                : 'UPDATE `plugin_upload`
                    SET upload_status = ?, upload_error = ?
                    WHERE upload_uuid = ?';
             $stmt = $this->db->prepare($sql);
             $stmt->bind_param('sss', $status, $error, $uuid);
         } else {
-            $sql  = $trackProcessed
-                ? 'UPDATE plugin_upload SET upload_status = ?, processed_at = NOW() WHERE upload_uuid = ?'
-                : 'UPDATE plugin_upload SET upload_status = ? WHERE upload_uuid = ?';
+            $sql = $trackProcessed
+                ? 'UPDATE `plugin_upload`
+                   SET upload_status = ?, processed_at = NOW()
+                   WHERE upload_uuid = ?'
+                : 'UPDATE `plugin_upload` SET upload_status = ? WHERE upload_uuid = ?';
             $stmt = $this->db->prepare($sql);
             $stmt->bind_param('ss', $status, $uuid);
         }
@@ -102,16 +88,41 @@ class UploadRepository
     }
 
     /**
-     * Returns a single upload record by UUID, or null if not found.
+     * Returns a single upload tracking record by UUID, joined with plugin metadata.
+     *
+     * Returns null if no upload exists for the given UUID.
+     *
+     * The returned array includes all plugin_upload columns plus the following
+     * from the plugin table: plugin_slug, plugin_name, plugin_author,
+     * plugin_requires, plugin_tested, plugin_requires_php, and
+     * plugin_short_description (aliased as plugin_description).
      *
      * @param  string $uuid UUID of the upload to look up.
      *
-     * @return array<string, mixed>|null Row from plugin_upload, or null.
+     * @return array<string, mixed>|null Row from plugin_upload LEFT JOIN plugin, or null.
      */
     public function findByUuid(string $uuid): ?array
     {
         $stmt = $this->db->prepare(
-            'SELECT * FROM plugin_upload WHERE upload_uuid = ?'
+            'SELECT pu.upload_uuid,
+                    pu.upload_ip,
+                    pu.plugin_id,
+                    pu.plugin_version,
+                    pu.upload_path,
+                    pu.upload_status,
+                    pu.upload_error,
+                    pu.uploaded_at,
+                    pu.processed_at,
+                    p.plugin_slug,
+                    p.plugin_name,
+                    p.plugin_author,
+                    p.plugin_requires,
+                    p.plugin_tested,
+                    p.plugin_requires_php,
+                    p.plugin_short_description AS plugin_description
+             FROM `plugin_upload` pu
+             LEFT JOIN `plugin` p ON p.plugin_id = pu.plugin_id
+             WHERE pu.upload_uuid = ?'
         );
         $stmt->bind_param('s', $uuid);
         $stmt->execute();
@@ -123,21 +134,29 @@ class UploadRepository
     }
 
     /**
-     * Returns the most recent $limit upload records, newest first.
+     * Returns the most recent $limit upload tracking records, newest first.
      *
-     * Used by the admin panel to display a live overview of API activity.
+     * Joins with the plugin table to include slug and name.
+     * Used by the admin panel to display a live overview of API upload activity.
      *
      * @param  int $limit Maximum number of rows to return.
      *
      * @return list<array<string, mixed>>
      */
-    public function getRecent(int $limit = 20): array
+    public function getRecentForAdmin(int $limit = 20): array
     {
         $stmt = $this->db->prepare(
-            'SELECT upload_uuid, upload_ip, plugin_name, plugin_slug,
-                    plugin_version, upload_status, upload_error, uploaded_at
-             FROM plugin_upload
-             ORDER BY uploaded_at DESC
+            'SELECT pu.upload_uuid,
+                    pu.upload_ip,
+                    pu.plugin_version,
+                    pu.upload_status,
+                    pu.upload_error,
+                    pu.uploaded_at,
+                    p.plugin_name,
+                    p.plugin_slug
+             FROM `plugin_upload` pu
+             LEFT JOIN `plugin` p ON p.plugin_id = pu.plugin_id
+             ORDER BY pu.uploaded_at DESC
              LIMIT ?'
         );
         $stmt->bind_param('i', $limit);
@@ -166,7 +185,7 @@ class UploadRepository
     public function countRecentByIp(string $ip, int $windowSeconds = 300): int
     {
         $stmt = $this->db->prepare(
-            'SELECT COUNT(*) FROM plugin_upload
+            'SELECT COUNT(*) FROM `plugin_upload`
              WHERE upload_ip = ?
                AND uploaded_at > DATE_SUB(NOW(), INTERVAL ? SECOND)'
         );
@@ -191,7 +210,7 @@ class UploadRepository
     public function requeueByUuid(string $uuid): void
     {
         $stmt = $this->db->prepare(
-            "UPDATE plugin_upload
+            "UPDATE `plugin_upload`
              SET upload_status = 'pending', upload_error = NULL
              WHERE upload_uuid = ?
                AND upload_status IN ('queued', 'error')
@@ -203,10 +222,13 @@ class UploadRepository
     }
 
     /**
-     * Returns up to $limit upload records with status 'pending'.
+     * Returns up to $limit upload tracking records with status 'pending'.
      *
      * These are uploads where the initial RabbitMQ publish failed and need
-     * to be retried by the validate-plugins cron.
+     * to be retried by the validate-plugins cron. Only rows with a resolved
+     * plugin_id and a non-null upload_path are returned.
+     *
+     * Joins with plugin to provide the slug for the RabbitMQ message.
      *
      * @param  int $limit Maximum number of rows to return.
      *
@@ -215,11 +237,16 @@ class UploadRepository
     public function getPendingBatch(int $limit): array
     {
         $stmt = $this->db->prepare(
-            "SELECT upload_uuid, plugin_slug, plugin_version, upload_path
-             FROM plugin_upload
-             WHERE upload_status = 'pending'
-               AND upload_path IS NOT NULL
-             ORDER BY uploaded_at
+            "SELECT pu.upload_uuid,
+                    pu.plugin_version,
+                    pu.upload_path,
+                    p.plugin_slug
+             FROM `plugin_upload` pu
+             JOIN `plugin` p ON p.plugin_id = pu.plugin_id
+             WHERE pu.upload_status = 'pending'
+               AND pu.upload_path IS NOT NULL
+               AND pu.plugin_id IS NOT NULL
+             ORDER BY pu.uploaded_at
              LIMIT ?"
         );
         $stmt->bind_param('i', $limit);

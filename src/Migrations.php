@@ -94,6 +94,10 @@ class Migrations
             $this->migrate220();
         }
 
+        if (version_compare($stored, '2.3.0', '<')) {
+            $this->migrate230();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -575,5 +579,160 @@ class Migrations
                 PRIMARY KEY (`locale_language`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci"
         );
+    }
+
+    /**
+     * 2.3.0 — Integrate API uploads into the standard plugin/plugin_version tables.
+     *
+     * Changes:
+     *  - pluginresult: reverts migration 2.2.0 — drops upload_uuid column, its FK,
+     *    index, and CHECK constraint; restores plugin_id to NOT NULL.
+     *  - plugin_upload: becomes a slim tracking table — adds plugin_id FK column;
+     *    legacy metadata columns are retained for historical rows.
+     *  - Data migration: for each existing plugin_upload row, inserts the plugin
+     *    into the plugin table (source='api') and a plugin_version row, then sets
+     *    plugin_upload.plugin_id to the resolved plugin_id.
+     *  - Adds index and FK on plugin_upload.plugin_id.
+     */
+    private function migrate230(): void
+    {
+        // ── 1. Revert pluginresult changes from 2.2.0 ────────────────────────
+
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             DROP CONSTRAINT IF EXISTS `chk_pluginresult_source`"
+        );
+
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             DROP FOREIGN KEY IF EXISTS `pluginresult_ibfk_3`"
+        );
+
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             DROP INDEX IF EXISTS `upload_uuid`"
+        );
+
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             DROP COLUMN IF EXISTS `upload_uuid`"
+        );
+
+        // Restore NOT NULL (safe: confirmed 0 rows with NULL plugin_id in production).
+        $this->db->query(
+            "ALTER TABLE `pluginresult`
+             MODIFY `plugin_id` bigint(20) unsigned NOT NULL"
+        );
+
+        // ── 2. Add plugin_id FK column to plugin_upload ───────────────────────
+
+        $this->db->query(
+            "ALTER TABLE `plugin_upload`
+             ADD COLUMN IF NOT EXISTS `plugin_id`
+                 bigint(20) unsigned DEFAULT NULL
+                 AFTER `upload_ip`"
+        );
+
+        // ── 3. Migrate existing plugin_upload rows → plugin + plugin_version ──
+
+        $result = $this->db->query(
+            "SELECT upload_id, plugin_slug, plugin_name, plugin_version,
+                    plugin_author, plugin_requires, plugin_tested,
+                    plugin_requires_php, plugin_description, upload_path
+             FROM `plugin_upload`
+             WHERE plugin_id IS NULL
+               AND plugin_slug IS NOT NULL
+               AND plugin_version IS NOT NULL"
+        );
+
+        if ($result instanceof mysqli_result) {
+            while ($row = $result->fetch_assoc()) {
+                // Insert API plugin (ON DUPLICATE KEY = already exists from a
+                // previous partial migration or a collision with another source).
+                $stmt = $this->db->prepare(
+                    "INSERT INTO `plugin`
+                         (plugin_source, plugin_slug, plugin_name, plugin_author,
+                          plugin_requires, plugin_tested, plugin_requires_php,
+                          plugin_short_description, plugin_version)
+                     VALUES ('api', ?, ?, ?, ?, ?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                         plugin_name    = COALESCE(VALUES(plugin_name),    plugin_name),
+                         plugin_version = COALESCE(VALUES(plugin_version), plugin_version)"
+                );
+                $stmt->bind_param(
+                    'ssssssss',
+                    $row['plugin_slug'],
+                    $row['plugin_name'],
+                    $row['plugin_author'],
+                    $row['plugin_requires'],
+                    $row['plugin_tested'],
+                    $row['plugin_requires_php'],
+                    $row['plugin_description'],
+                    $row['plugin_version']
+                );
+                $stmt->execute();
+                $stmt->close();
+
+                // Resolve plugin_id.
+                $stmt = $this->db->prepare(
+                    "SELECT plugin_id FROM `plugin`
+                     WHERE plugin_source = 'api' AND plugin_slug = ?
+                     LIMIT 1"
+                );
+                $stmt->bind_param('s', $row['plugin_slug']);
+                $stmt->execute();
+                $pRow = $stmt->get_result()->fetch_row();
+                $stmt->close();
+
+                if ($pRow === null) {
+                    continue;
+                }
+
+                $pluginId = (int) $pRow[0];
+
+                // Insert plugin_version row (idempotent).
+                $stmt = $this->db->prepare(
+                    "INSERT INTO `plugin_version` (plugin_id, plugin_version)
+                     VALUES (?, ?)
+                     ON DUPLICATE KEY UPDATE plugin_id = plugin_id"
+                );
+                $stmt->bind_param('is', $pluginId, $row['plugin_version']);
+                $stmt->execute();
+                $stmt->close();
+
+                // Link tracking row to the resolved plugin.
+                $stmt = $this->db->prepare(
+                    "UPDATE `plugin_upload` SET plugin_id = ? WHERE upload_id = ?"
+                );
+                $stmt->bind_param('ii', $pluginId, $row['upload_id']);
+                $stmt->execute();
+                $stmt->close();
+            }
+        }
+
+        // ── 4. Index and FK on plugin_upload.plugin_id ───────────────────────
+
+        $this->db->query(
+            "ALTER TABLE `plugin_upload`
+             ADD INDEX IF NOT EXISTS `idx_upload_plugin_id` (`plugin_id`)"
+        );
+
+        // MariaDB does not support IF NOT EXISTS on ADD CONSTRAINT FOREIGN KEY;
+        // guard with an information_schema check.
+        $ckFk = $this->db->query(
+            "SELECT 1 FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME   = 'plugin_upload'
+               AND CONSTRAINT_NAME = 'fk_upload_plugin_id'
+             LIMIT 1"
+        );
+
+        if ($ckFk instanceof mysqli_result && $ckFk->num_rows === 0) {
+            $this->db->query(
+                "ALTER TABLE `plugin_upload`
+                 ADD CONSTRAINT `fk_upload_plugin_id`
+                 FOREIGN KEY (`plugin_id`) REFERENCES `plugin` (`plugin_id`)"
+            );
+        }
     }
 }
