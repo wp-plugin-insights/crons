@@ -222,6 +222,53 @@ class UploadRepository
     }
 
     /**
+     * Returns up to $limit uploads that are stuck in 'queued' status with no
+     * analysis results yet.
+     *
+     * An upload is considered stuck when its status is 'queued' and no row
+     * exists in pluginresult for the same plugin_id + plugin_version pair.
+     * Results are ordered oldest first so the longest-waiting items appear at
+     * the top.
+     *
+     * @param  int $limit Maximum number of rows to return.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function getStuckQueued(int $limit = 50): array
+    {
+        $stmt = $this->db->prepare(
+            "SELECT pu.upload_uuid,
+                    pu.plugin_id,
+                    pu.plugin_version,
+                    pu.upload_status,
+                    pu.uploaded_at,
+                    p.plugin_name,
+                    p.plugin_slug
+             FROM `plugin_upload` pu
+             LEFT JOIN `plugin` p ON p.plugin_id = pu.plugin_id
+             WHERE pu.upload_status = 'queued'
+               AND NOT EXISTS (
+                   SELECT 1 FROM `pluginresult` pr
+                   WHERE pr.plugin_id = pu.plugin_id
+                     AND pr.plugin_version = pu.plugin_version
+               )
+             ORDER BY pu.uploaded_at
+             LIMIT ?"
+        );
+        $stmt->bind_param('i', $limit);
+        $stmt->execute();
+
+        $result = $stmt->get_result();
+        $rows   = [];
+        while ($row = $result->fetch_assoc()) {
+            $rows[] = $row;
+        }
+        $stmt->close();
+
+        return $rows;
+    }
+
+    /**
      * Returns up to $limit upload tracking records with status 'pending'.
      *
      * These are uploads where the initial RabbitMQ publish failed and need

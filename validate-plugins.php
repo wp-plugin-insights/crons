@@ -39,7 +39,7 @@ use PluginInsight\RabbitMqPublisher;
 use PluginInsight\UploadRepository;
 
 /** Current schema version. */
-const DB_VERSION = '2.3.0';
+const DB_VERSION = '2.4.0';
 
 /** Number of plugin versions processed per run. */
 const BATCH_SIZE = 10;

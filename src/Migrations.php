@@ -98,6 +98,10 @@ class Migrations
             $this->migrate230();
         }
 
+        if (version_compare($stored, '2.4.0', '<')) {
+            $this->migrate240();
+        }
+
         $this->setVersion($targetVersion);
     }
 
@@ -734,5 +738,22 @@ class Migrations
                  FOREIGN KEY (`plugin_id`) REFERENCES `plugin` (`plugin_id`)"
             );
         }
+    }
+
+    /**
+     * 2.4.0 — Add runner_sort_order to the runner table.
+     *
+     * Controls the display order of analysis cards on the plugin detail page
+     * and in the API response. Runners with sort_order = 0 (the default) are
+     * shown after explicitly-ordered runners, sorted alphabetically by name.
+     */
+    private function migrate240(): void
+    {
+        $this->db->query(
+            "ALTER TABLE `runner`
+             ADD COLUMN IF NOT EXISTS `runner_sort_order`
+                 SMALLINT UNSIGNED NOT NULL DEFAULT 0
+                 AFTER `runner_is_active`"
+        );
     }
 }

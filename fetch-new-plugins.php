@@ -26,7 +26,7 @@ use PluginInsight\PluginSync;
 use PluginInsight\WpPluginFetcher;
 
 /** Current schema version. Increment when migrations are added. */
-const DB_VERSION = '2.3.0';
+const DB_VERSION = '2.4.0';
 
 /** Plugins per API page (WordPress.org maximum). */
 const PER_PAGE = 200;

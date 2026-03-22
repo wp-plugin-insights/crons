@@ -368,9 +368,34 @@ chown plugininsight:plugininsight /webs/plugininsight/crons/rabbitmq.php
 chmod 640 /webs/plugininsight/crons/rabbitmq.php
 ```
 
-### 9. Install systemd unit files
+### 9. Set up database backup scripts
 
-Create all 12 files (6 services + 6 timers):
+```bash
+mkdir -p /webs/plugininsight/database
+chown plugininsight:plugininsight /webs/plugininsight/database
+chmod 750 /webs/plugininsight/database
+
+# Copy backup-schema.sh and backup-data.sh from the repo, then:
+chmod 750 /webs/plugininsight/database/backup-schema.sh
+chmod 750 /webs/plugininsight/database/backup-data.sh
+
+# Create the credentials file
+cat > /webs/plugininsight/database/.db-credentials.cnf << 'EOF'
+[client]
+host     = 127.0.0.1
+port     = 3306
+user     = plugininsight
+password = CHANGE_PASSWORD_HERE   # ← CHANGE THIS
+EOF
+chmod 640 /webs/plugininsight/database/.db-credentials.cnf
+chown plugininsight:plugininsight /webs/plugininsight/database/.db-credentials.cnf
+```
+
+See `database/README.md` for full details on the backup scripts.
+
+### 10. Install systemd unit files
+
+Create all 16 files (8 services + 8 timers):
 
 ```bash
 # ── fetch-new-plugins ────────────────────────────────────────────────────────
@@ -545,9 +570,65 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
+
+# ── db-backup-schema ──────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-db-backup-schema.service << 'EOF'
+[Unit]
+Description=PluginInsight — dump database schema (DDL only) to database/schema.sql
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /webs/plugininsight/database/backup-schema.sh
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/database
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-db-backup-schema.timer << 'EOF'
+[Unit]
+Description=PluginInsight — dump database schema every hour
+
+[Timer]
+OnCalendar=*:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# ── db-backup-data ────────────────────────────────────────────────────────────
+cat > /etc/systemd/system/plugininsight-db-backup-data.service << 'EOF'
+[Unit]
+Description=PluginInsight — dump database data to database/data-<timestamp>.sql
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /webs/plugininsight/database/backup-data.sh
+User=plugininsight
+Group=plugininsight
+WorkingDirectory=/webs/plugininsight/database
+StandardOutput=journal
+StandardError=journal
+EOF
+
+cat > /etc/systemd/system/plugininsight-db-backup-data.timer << 'EOF'
+[Unit]
+Description=PluginInsight — dump database data every hour (offset 5 min from schema job)
+
+[Timer]
+OnCalendar=*:05:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
 ```
 
-### 10. Enable all timers
+### 11. Enable all timers
 
 ```bash
 systemctl daemon-reload
@@ -558,6 +639,8 @@ systemctl enable --now plugininsight-validate-plugins.timer
 systemctl enable --now plugininsight-cleanup-plugins.timer
 systemctl enable --now plugininsight-fetch-wp-versions.timer
 systemctl enable --now plugininsight-fetch-wp-locales.timer
+systemctl enable --now plugininsight-db-backup-schema.timer
+systemctl enable --now plugininsight-db-backup-data.timer
 ```
 
 Verify all timers are scheduled:
@@ -566,7 +649,7 @@ Verify all timers are scheduled:
 systemctl list-timers 'plugininsight-*'
 ```
 
-### 11. Smoke-test
+### 12. Smoke-test
 
 Run each script once manually as the service user to confirm connectivity:
 
@@ -576,6 +659,8 @@ sudo -u plugininsight php8.4 /webs/plugininsight/crons/fetch-wp-locales.php
 sudo -u plugininsight php8.4 /webs/plugininsight/crons/fetch-new-plugins.php
 sudo -u plugininsight php8.4 /webs/plugininsight/crons/validate-plugins.php
 sudo -u plugininsight php8.4 /webs/plugininsight/crons/cleanup-plugins.php
+sudo -u plugininsight bash /webs/plugininsight/database/backup-schema.sh
+sudo -u plugininsight bash /webs/plugininsight/database/backup-data.sh
 ```
 
 ---
@@ -591,6 +676,8 @@ systemctl start plugininsight-validate-plugins.service
 systemctl start plugininsight-cleanup-plugins.service
 systemctl start plugininsight-fetch-wp-versions.service
 systemctl start plugininsight-fetch-wp-locales.service
+systemctl start plugininsight-db-backup-schema.service
+systemctl start plugininsight-db-backup-data.service
 ```
 
 ### Follow live output
@@ -602,6 +689,8 @@ journalctl -u plugininsight-validate-plugins.service -f
 journalctl -u plugininsight-cleanup-plugins.service -f
 journalctl -u plugininsight-fetch-wp-versions.service -f
 journalctl -u plugininsight-fetch-wp-locales.service -f
+journalctl -u plugininsight-db-backup-schema.service -f
+journalctl -u plugininsight-db-backup-data.service -f
 ```
 
 ### Disable all timers
@@ -613,7 +702,9 @@ systemctl disable --now \
   plugininsight-validate-plugins.timer \
   plugininsight-cleanup-plugins.timer \
   plugininsight-fetch-wp-versions.timer \
-  plugininsight-fetch-wp-locales.timer
+  plugininsight-fetch-wp-locales.timer \
+  plugininsight-db-backup-schema.timer \
+  plugininsight-db-backup-data.timer
 ```
 
 ---
